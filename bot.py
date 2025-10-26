@@ -16,29 +16,30 @@ from telegram.ext import (
     filters,
 )
 
-# ================== CONFIG ==================
+# =========== CONFIG ===========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_GROUP_ID = -1003294631521    # groupe privé admin
 PUBLIC_GROUP_ID = -1003245719893   # groupe public
 
-# PENDING : signalements en attente validation
+# PENDING : signalements en attente de validation
 # PENDING[report_id] = {
 #   "files": [ {"type": "photo"/"video", "file_id": "..."} ],
 #   "text": "....",
 # }
 PENDING = {}
 
-# TEMP_ALBUMS : réception progressive d'un album
+# TEMP_ALBUMS : album en cours de réception
 # TEMP_ALBUMS[media_group_id] = {
 #   "files": [...],
 #   "text": "...",
 #   "user_name": "...",
-#   "ts": last_timestamp,
+#   "ts": timestamp_last_piece,
 #   "chat_id": chat_id,
-#}
+#   "done": False    # <--- nouveau, pour éviter le spam
+# }
 TEMP_ALBUMS = {}
-# ============================================
+# =============================
 
 
 def _now():
@@ -49,11 +50,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user = msg.from_user
 
-    # texte envoyé (caption média OU message texte)
+    # texte envoyé par l'utilisateur (caption média OU message texte)
     piece_text = (msg.caption or msg.text or "").strip()
     user_name = f"@{user.username}" if user.username else "anonyme"
 
-    # Détecter le type de contenu
+    # Détecter média
     if msg.video:
         media_type = "video"
         file_id = msg.video.file_id
@@ -66,7 +67,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     media_group_id = msg.media_group_id  # None si pas album
 
-    # ----- CAS 1 : PAS ALBUM -----
+    # ----- CAS 1 : message simple (pas album) -----
     if media_group_id is None:
         report_id = f"{msg.chat_id}_{msg.id}"
 
@@ -81,7 +82,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "file_id": file_id,
             })
 
-        # message aperçu pour admin
+        # Preview admin
         admin_preview = f"📩 Nouveau signalement\n👤 {user_name}"
         if piece_text:
             admin_preview += f"\n\n{piece_text}"
@@ -93,7 +94,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             ]]
         )
 
-        # envoyer dans groupe admin
+        # Envoi dans le groupe admin
         if media_type == "video":
             await context.bot.send_video(
                 chat_id=ADMIN_GROUP_ID,
@@ -115,11 +116,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=keyboard
             )
 
-        # réponse à l'utilisateur
+        # réponse user
         await msg.reply_text("✅ Reçu. Merci. Vérif avant publication.")
         return
 
-    # ----- CAS 2 : ALBUM -----
+    # ----- CAS 2 : album (plusieurs médias envoyés en une fois) -----
     album = TEMP_ALBUMS.get(media_group_id)
 
     if album is None:
@@ -129,44 +130,52 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             "user_name": user_name,
             "ts": _now(),
             "chat_id": msg.chat_id,
+            "done": False,  # nouvel indicateur
         }
         album = TEMP_ALBUMS[media_group_id]
 
-    # ajouter ce média dans l'album
+    # Ajoute ce média
     if media_type in ["photo", "video"]:
         album["files"].append({
             "type": media_type,
             "file_id": file_id,
         })
 
-    # si du texte arrive et qu'on n'en avait pas encore stocké
+    # si du texte arrive et qu'on n'en avait pas encore
     if piece_text and not album["text"]:
         album["text"] = piece_text
 
     album["ts"] = _now()
 
-    # on déclenche la finalisation après un mini délai
+    # on tente la finalisation après un mini délai, mais une seule fois
     asyncio.create_task(
         finalize_album_later(media_group_id, context, msg)
     )
 
 
 async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
-    # On attend 0.5s pour laisser Telegram envoyer toutes les pièces du même album
+    # Laisse Telegram envoyer toutes les pièces (0.5s)
     await asyncio.sleep(0.5)
 
     album = TEMP_ALBUMS.get(media_group_id)
     if album is None:
         return
 
+    # si déjà traité, on ne renvoie pas encore une fois
+    if album.get("done"):
+        return
+
+    # on marque "envoyé"
+    album["done"] = True
+
     report_id = f"{album['chat_id']}_{media_group_id}"
 
+    # Sauvegarde pour plus tard (publication)
     PENDING[report_id] = {
         "files": album["files"],
         "text": album["text"],
     }
 
-    # Aperçu pour admin
     admin_preview = f"📩 Nouveau signalement (album)\n👤 {album['user_name']}"
     if album["text"]:
         admin_preview += f"\n\n{album['text']}"
@@ -180,12 +189,8 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 
     files = album["files"]
 
-    # ⚠️ NOUVEL ORDRE :
-    # 1) on envoie d'abord le message texte + boutons
-    # 2) puis on envoie l'album sans boutons
-    # comme ça, même si Telegram lag, tu as AU MOINS le bloc avec les boutons
-
-    # 1) message texte + boutons
+    # ENVOI ADMIN :
+    # On commence par le message avec le texte + les boutons (très important pour toi)
     try:
         await context.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
@@ -193,19 +198,18 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
             reply_markup=keyboard
         )
     except Exception:
-        # si ça rate, on essaie quand même d'envoyer l'album après
+        # ignore si réseau lent
         pass
 
-    # 2) envoi des médias
+    # Ensuite on envoie les médias reçus (sans bouton)
     if len(files) == 1:
-        # un seul média dans "l'album"
         m = files[0]
         try:
             if m["type"] == "photo":
                 await context.bot.send_photo(
                     chat_id=ADMIN_GROUP_ID,
                     photo=m["file_id"],
-                    caption=None  # caption déjà envoyée dans le message texte
+                    caption=None
                 )
             else:
                 await context.bot.send_video(
@@ -216,7 +220,6 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
     else:
-        # plusieurs médias -> on envoie le groupe
         media_group = []
         for m in files:
             if m["type"] == "photo":
@@ -232,7 +235,8 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-    # nettoyer le cache temporaire de l'album
+    # on laisse l'album encore dispo dans TEMP_ALBUMS pour debug si besoin,
+    # mais on pourrait aussi le pop ici. On va le pop pour pas saturer la RAM.
     TEMP_ALBUMS.pop(media_group_id, None)
 
     # répondre à l'utilisateur une seule fois
