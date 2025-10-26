@@ -344,8 +344,9 @@ def main():
     # clic sur ✅ / ❌
     app.add_handler(CallbackQueryHandler(on_button_click))
 
-    app.run_polling()
+    app.run_polling(poll_interval=2.0)
 
 
 if __name__ == "__main__":
     main()
+
