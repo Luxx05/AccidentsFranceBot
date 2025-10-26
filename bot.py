@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -21,20 +22,21 @@ ADMIN_GROUP_ID = -1003294631521    # Groupe privé admin
 PUBLIC_GROUP_ID = -1003245719893   # Groupe public
 # =====================
 
-# On garde en mémoire ce que les gens envoient
+# PENDING stocke les signalements prêts à valider
 # PENDING[report_id] = {
-#   "files": [ {"type": "photo"|"video", "file_id": "..."} , ... ],
+#   "files": [ {"type": "photo"/"video", "file_id": "..."} , ... ],
 #   "text": "....",
 # }
 PENDING = {}
 
-# Pour regrouper les albums (media_group_id)
+# TEMP_ALBUMS stocke temporairement les albums en cours de réception
 # TEMP_ALBUMS[media_group_id] = {
 #   "files": [...],
 #   "text": "...",
 #   "user_name": "...",
-#   "ts": timestamp_last_msg,
-# }
+#   "ts": timestamp_last_piece,
+#   "chat_id": ...,
+#}
 TEMP_ALBUMS = {}
 
 
@@ -46,10 +48,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user = msg.from_user
 
-    # Récupérer le texte utilisateur (caption du média + message texte)
-    # -> si c'est un album, chaque élément peut avoir la même caption, on fusionne
+    # Récupère texte: caption (photo/video) OU texte normal
     piece_text = (msg.caption or msg.text or "").strip()
-
     user_name = f"@{user.username}" if user.username else "anonyme"
 
     # Détecter le média
@@ -63,15 +63,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         media_type = "text"
         file_id = None
 
-    # Est-ce que c'est un album ?
     media_group_id = msg.media_group_id  # None si pas album
 
-    # CAS 1 : pas d'album -> traitement direct
+    # CAS 1 : message classique (pas un album)
     if media_group_id is None:
-        # On crée un ID unique pour ce signalement
         report_id = f"{msg.chat_id}_{msg.id}"
 
-        # On stocke ça dans PENDING
         PENDING[report_id] = {
             "files": [],
             "text": piece_text,
@@ -83,7 +80,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "file_id": file_id,
             })
 
-        # Preview pour groupe admin
         admin_preview = f"📩 Nouveau signalement\n👤 {user_name}"
         if piece_text:
             admin_preview += f"\n\n{piece_text}"
@@ -111,71 +107,66 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=keyboard
             )
         else:
-            # juste du texte
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
                 text=admin_preview,
                 reply_markup=keyboard
             )
 
-        # Répond à l'utilisateur
+        # Réponse user
         await msg.reply_text("✅ Reçu. Merci. Vérif avant publication.")
         return
 
-    # CAS 2 : c'est un album (plusieurs médias envoyés d'un coup)
-    # On groupe par media_group_id
+    # CAS 2 : album (plusieurs médias envoyés en une fois)
     album = TEMP_ALBUMS.get(media_group_id)
 
     if album is None:
-        # première pièce de cet album
         TEMP_ALBUMS[media_group_id] = {
             "files": [],
             "text": piece_text,
             "user_name": user_name,
             "ts": _now(),
+            "chat_id": msg.chat_id,
         }
         album = TEMP_ALBUMS[media_group_id]
 
-    # Ajoute ce média dans l'album
+    # Ajoute ce média
     if media_type in ["photo", "video"]:
         album["files"].append({
             "type": media_type,
             "file_id": file_id,
         })
 
-    # si ce message a du texte et qu'on n'avait rien avant, on le garde
+    # garde du texte si dispo
     if piece_text and not album["text"]:
         album["text"] = piece_text
 
     album["ts"] = _now()
 
-    # On attend un tout petit peu avant d'envoyer pour être sûr d'avoir toutes les photos/vidéos de l'album.
-    # Astuce : on lance un petit job async différé.
-    context.application.create_task(finish_album_if_complete(media_group_id, context, msg))
+    # on lance une tâche async "indépendante" pour finaliser l'album après un mini délai
+    asyncio.create_task(finish_album_if_complete(media_group_id, context, msg))
 
 
 async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
     """
-    On attend un mini délai pour être sûr d'avoir tout l'album.
-    Telegram envoie les médias d'un album les uns à la suite très vite.
+    Attend un court délai pour laisser Telegram envoyer toutes les pièces de l'album,
+    puis envoie UNE seule preview dans le groupe admin.
     """
-    await context.application.bot._async_tasks.create_task(_sleep_small())
+    # petite pause
+    await asyncio.sleep(0.5)
 
-    # Re-check après le délai
+    # on récupère l'album final
     album = TEMP_ALBUMS.get(media_group_id)
     if album is None:
         return
 
-    # On génère un report_id unique basé sur chat et timestamp
-    report_id = f"{original_msg.chat_id}_{media_group_id}"
+    report_id = f"{album['chat_id']}_{media_group_id}"
 
-    # On enregistre cet album en attente d'approbation
     PENDING[report_id] = {
-        "files": album["files"],      # liste de médias
-        "text": album["text"],        # texte commun
+        "files": album["files"],
+        "text": album["text"],
     }
 
-    # Construire l'aperçu admin
     admin_preview = f"📩 Nouveau signalement (album)\n👤 {album['user_name']}"
     if album["text"]:
         admin_preview += f"\n\n{album['text']}"
@@ -187,34 +178,33 @@ async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT
         ]]
     )
 
-    # On envoie un seul bloc au groupe admin :
     files = album["files"]
 
     if len(files) == 1:
-        # album d'un seul média = simple
+        # album d'un seul média => on envoie normal
         media = files[0]
         if media["type"] == "photo":
-            sent = await context.bot.send_photo(
+            await context.bot.send_photo(
                 chat_id=ADMIN_GROUP_ID,
                 photo=media["file_id"],
                 caption=admin_preview,
                 reply_markup=keyboard
             )
         else:
-            sent = await context.bot.send_video(
+            await context.bot.send_video(
                 chat_id=ADMIN_GROUP_ID,
                 video=media["file_id"],
                 caption=admin_preview,
                 reply_markup=keyboard
             )
     else:
-        # Plusieurs médias -> on envoie un media group dans l'admin
+        # plusieurs médias : on envoie l'album dans l'admin sans bouton…
         media_group = []
         for i, m in enumerate(files):
             if m["type"] == "photo":
                 media_group.append(InputMediaPhoto(
                     media=m["file_id"],
-                    caption=admin_preview if i == 0 else None  # caption seulement sur le 1er
+                    caption=admin_preview if i == 0 else None
                 ))
             else:
                 media_group.append(InputMediaVideo(
@@ -222,34 +212,26 @@ async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT
                     caption=admin_preview if i == 0 else None
                 ))
 
-        # Telegram n'autorise pas les boutons inline directement sur un envoi "album" (media_group)
-        # donc on fait 2 envois :
-        # 1) l'album sans boutons
-        # 2) un message texte juste après avec les boutons
         await context.bot.send_media_group(
             chat_id=ADMIN_GROUP_ID,
             media=media_group
         )
 
-        sent = await context.bot.send_message(
+        # …puis un message texte séparé AVEC les boutons
+        await context.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
             text=admin_preview,
             reply_markup=keyboard
         )
 
-    # clean l'album temp
+    # clean temp album
     TEMP_ALBUMS.pop(media_group_id, None)
 
-    # Répond à l'utilisateur une seule fois (sur le dernier message)
+    # répondre à l'utilisateur une seule fois
     try:
-        await original_msg.reply_text("✅ Reçu (album). Merci. Vérif avant publication.")
+        await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
     except:
         pass
-
-
-async def _sleep_small():
-    # mini pause pour laisser le temps à Telegram d'envoyer toutes les pièces de l'album
-    time.sleep(0.4)
 
 
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,7 +256,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (info["text"] or "").strip()
         text_or_none = text if text else None
 
-        # Cas 1 : aucun média, juste texte
+        # Cas : aucun média, juste du texte
         if not files:
             if text:
                 await context.bot.send_message(
@@ -287,7 +269,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             PENDING.pop(report_id, None)
             return
 
-        # Cas 2 : un seul média
+        # Cas : un seul média
         if len(files) == 1:
             m = files[0]
             if m["type"] == "photo":
@@ -307,7 +289,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             PENDING.pop(report_id, None)
             return
 
-        # Cas 3 : plusieurs médias -> envoyer un album dans le groupe public
+        # Cas : plusieurs médias -> on publie un album dans le groupe public
         media_group = []
         for i, m in enumerate(files):
             if m["type"] == "photo":
@@ -331,11 +313,11 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def safe_edit(query, new_text: str):
-    # essaie d'éditer comme caption (si c'était un media avec légende)
+    # essaie d'éditer la légende (si c'était une photo/vidéo),
+    # sinon essaie d'éditer le texte du message bouton
     try:
         await query.edit_message_caption(caption=new_text)
     except:
-        # sinon comme texte pur
         try:
             await query.edit_message_text(text=new_text)
         except:
@@ -345,7 +327,7 @@ async def safe_edit(query, new_text: str):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # chaque message envoyé au bot déclenche handle_user_message
+    # tous les messages envoyés au bot
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
     # clic sur ✅ / ❌
