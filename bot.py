@@ -11,7 +11,7 @@ from telegram.ext import (
 
 # ====== CONFIG ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # variable d'env Render
-ADMIN_GROUP_ID = -5694113795        # groupe privé admin (toi)
+ADMIN_GROUP_ID = -1003294631521        # groupe privé admin (toi)
 PUBLIC_GROUP_ID = -1003245719893    # groupe public
 # =====================
 
@@ -155,3 +155,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
