@@ -180,55 +180,62 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 
     files = album["files"]
 
-    # 1 SEUL média dans l'album -> on envoie direct avec boutons
-    if len(files) == 1:
-        m = files[0]
-        if m["type"] == "photo":
-            await context.bot.send_photo(
-                chat_id=ADMIN_GROUP_ID,
-                photo=m["file_id"],
-                caption=admin_preview,
-                reply_markup=keyboard
-            )
-        else:
-            await context.bot.send_video(
-                chat_id=ADMIN_GROUP_ID,
-                video=m["file_id"],
-                caption=admin_preview,
-                reply_markup=keyboard
-            )
-    else:
-        # plusieurs médias -> on envoie le groupe puis un message bouton
-        media_group = []
-        for i, m in enumerate(files):
-            if m["type"] == "photo":
-                media_group.append(InputMediaPhoto(
-                    media=m["file_id"],
-                    caption=admin_preview if i == 0 else None
-                ))
-            else:
-                media_group.append(InputMediaVideo(
-                    media=m["file_id"],
-                    caption=admin_preview if i == 0 else None
-                ))
+    # ⚠️ NOUVEL ORDRE :
+    # 1) on envoie d'abord le message texte + boutons
+    # 2) puis on envoie l'album sans boutons
+    # comme ça, même si Telegram lag, tu as AU MOINS le bloc avec les boutons
 
-        # envoi de l'album (sans boutons)
-        await context.bot.send_media_group(
-            chat_id=ADMIN_GROUP_ID,
-            media=media_group
-        )
-
-        # juste après, envoi du message texte + boutons
+    # 1) message texte + boutons
+    try:
         await context.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
             text=admin_preview,
             reply_markup=keyboard
         )
+    except Exception:
+        # si ça rate, on essaie quand même d'envoyer l'album après
+        pass
+
+    # 2) envoi des médias
+    if len(files) == 1:
+        # un seul média dans "l'album"
+        m = files[0]
+        try:
+            if m["type"] == "photo":
+                await context.bot.send_photo(
+                    chat_id=ADMIN_GROUP_ID,
+                    photo=m["file_id"],
+                    caption=None  # caption déjà envoyée dans le message texte
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=ADMIN_GROUP_ID,
+                    video=m["file_id"],
+                    caption=None
+                )
+        except Exception:
+            pass
+    else:
+        # plusieurs médias -> on envoie le groupe
+        media_group = []
+        for m in files:
+            if m["type"] == "photo":
+                media_group.append(InputMediaPhoto(media=m["file_id"]))
+            else:
+                media_group.append(InputMediaVideo(media=m["file_id"]))
+
+        try:
+            await context.bot.send_media_group(
+                chat_id=ADMIN_GROUP_ID,
+                media=media_group
+            )
+        except Exception:
+            pass
 
     # nettoyer le cache temporaire de l'album
     TEMP_ALBUMS.pop(media_group_id, None)
 
-    # répondre à l'utilisateur (évite spam si déjà répondu)
+    # répondre à l'utilisateur une seule fois
     try:
         await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
     except Exception:
@@ -327,7 +334,7 @@ async def safe_edit(query, new_text: str):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # tout message au bot
+    # tout message envoyé au bot
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
     # clic sur ✅ / ❌
