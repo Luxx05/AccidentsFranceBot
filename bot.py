@@ -1,8 +1,8 @@
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ========= CONFIG =========
-import os
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # token BotFather
 ADMIN_CHAT_ID = -5694113795        # ton groupe admin privé (met un - devant l’ID)
 PUBLIC_CHAT_ID = -1003245719893    # ton groupe public (ajoute toujours le -100 devant)
@@ -87,4 +87,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
