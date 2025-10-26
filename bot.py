@@ -16,28 +16,29 @@ from telegram.ext import (
     filters,
 )
 
-# ====== CONFIG ======
+# ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_GROUP_ID = -1003294631521    # Groupe privé admin
-PUBLIC_GROUP_ID = -1003245719893   # Groupe public
-# =====================
 
-# PENDING stocke les signalements prêts à valider
+ADMIN_GROUP_ID = -1003294631521    # groupe privé admin
+PUBLIC_GROUP_ID = -1003245719893   # groupe public
+
+# PENDING : signalements en attente validation
 # PENDING[report_id] = {
-#   "files": [ {"type": "photo"/"video", "file_id": "..."} , ... ],
+#   "files": [ {"type": "photo"/"video", "file_id": "..."} ],
 #   "text": "....",
 # }
 PENDING = {}
 
-# TEMP_ALBUMS stocke temporairement les albums en cours de réception
+# TEMP_ALBUMS : réception progressive d'un album
 # TEMP_ALBUMS[media_group_id] = {
 #   "files": [...],
 #   "text": "...",
 #   "user_name": "...",
-#   "ts": timestamp_last_piece,
-#   "chat_id": ...,
+#   "ts": last_timestamp,
+#   "chat_id": chat_id,
 #}
 TEMP_ALBUMS = {}
+# ============================================
 
 
 def _now():
@@ -48,11 +49,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user = msg.from_user
 
-    # Récupère texte: caption (photo/video) OU texte normal
+    # texte envoyé (caption média OU message texte)
     piece_text = (msg.caption or msg.text or "").strip()
     user_name = f"@{user.username}" if user.username else "anonyme"
 
-    # Détecter le média
+    # Détecter le type de contenu
     if msg.video:
         media_type = "video"
         file_id = msg.video.file_id
@@ -65,7 +66,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     media_group_id = msg.media_group_id  # None si pas album
 
-    # CAS 1 : message classique (pas un album)
+    # ----- CAS 1 : PAS ALBUM -----
     if media_group_id is None:
         report_id = f"{msg.chat_id}_{msg.id}"
 
@@ -80,6 +81,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "file_id": file_id,
             })
 
+        # message aperçu pour admin
         admin_preview = f"📩 Nouveau signalement\n👤 {user_name}"
         if piece_text:
             admin_preview += f"\n\n{piece_text}"
@@ -91,7 +93,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             ]]
         )
 
-        # Envoi dans le groupe admin
+        # envoyer dans groupe admin
         if media_type == "video":
             await context.bot.send_video(
                 chat_id=ADMIN_GROUP_ID,
@@ -113,11 +115,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=keyboard
             )
 
-        # Réponse user
+        # réponse à l'utilisateur
         await msg.reply_text("✅ Reçu. Merci. Vérif avant publication.")
         return
 
-    # CAS 2 : album (plusieurs médias envoyés en une fois)
+    # ----- CAS 2 : ALBUM -----
     album = TEMP_ALBUMS.get(media_group_id)
 
     if album is None:
@@ -130,32 +132,29 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         }
         album = TEMP_ALBUMS[media_group_id]
 
-    # Ajoute ce média
+    # ajouter ce média dans l'album
     if media_type in ["photo", "video"]:
         album["files"].append({
             "type": media_type,
             "file_id": file_id,
         })
 
-    # garde du texte si dispo
+    # si du texte arrive et qu'on n'en avait pas encore stocké
     if piece_text and not album["text"]:
         album["text"] = piece_text
 
     album["ts"] = _now()
 
-    # on lance une tâche async "indépendante" pour finaliser l'album après un mini délai
-    asyncio.create_task(finish_album_if_complete(media_group_id, context, msg))
+    # on déclenche la finalisation après un mini délai
+    asyncio.create_task(
+        finalize_album_later(media_group_id, context, msg)
+    )
 
 
-async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
-    """
-    Attend un court délai pour laisser Telegram envoyer toutes les pièces de l'album,
-    puis envoie UNE seule preview dans le groupe admin.
-    """
-    # petite pause
+async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
+    # On attend 0.5s pour laisser Telegram envoyer toutes les pièces du même album
     await asyncio.sleep(0.5)
 
-    # on récupère l'album final
     album = TEMP_ALBUMS.get(media_group_id)
     if album is None:
         return
@@ -167,6 +166,7 @@ async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT
         "text": album["text"],
     }
 
+    # Aperçu pour admin
     admin_preview = f"📩 Nouveau signalement (album)\n👤 {album['user_name']}"
     if album["text"]:
         admin_preview += f"\n\n{album['text']}"
@@ -180,25 +180,25 @@ async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT
 
     files = album["files"]
 
+    # 1 SEUL média dans l'album -> on envoie direct avec boutons
     if len(files) == 1:
-        # album d'un seul média => on envoie normal
-        media = files[0]
-        if media["type"] == "photo":
+        m = files[0]
+        if m["type"] == "photo":
             await context.bot.send_photo(
                 chat_id=ADMIN_GROUP_ID,
-                photo=media["file_id"],
+                photo=m["file_id"],
                 caption=admin_preview,
                 reply_markup=keyboard
             )
         else:
             await context.bot.send_video(
                 chat_id=ADMIN_GROUP_ID,
-                video=media["file_id"],
+                video=m["file_id"],
                 caption=admin_preview,
                 reply_markup=keyboard
             )
     else:
-        # plusieurs médias : on envoie l'album dans l'admin sans bouton…
+        # plusieurs médias -> on envoie le groupe puis un message bouton
         media_group = []
         for i, m in enumerate(files):
             if m["type"] == "photo":
@@ -212,25 +212,26 @@ async def finish_album_if_complete(media_group_id, context: ContextTypes.DEFAULT
                     caption=admin_preview if i == 0 else None
                 ))
 
+        # envoi de l'album (sans boutons)
         await context.bot.send_media_group(
             chat_id=ADMIN_GROUP_ID,
             media=media_group
         )
 
-        # …puis un message texte séparé AVEC les boutons
+        # juste après, envoi du message texte + boutons
         await context.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
             text=admin_preview,
             reply_markup=keyboard
         )
 
-    # clean temp album
+    # nettoyer le cache temporaire de l'album
     TEMP_ALBUMS.pop(media_group_id, None)
 
-    # répondre à l'utilisateur une seule fois
+    # répondre à l'utilisateur (évite spam si déjà répondu)
     try:
         await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
-    except:
+    except Exception:
         pass
 
 
@@ -238,7 +239,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    data = query.data  # "APPROVE|<report_id>" ou "REJECT|<report_id>"
+    data = query.data  # "APPROVE|report_id" ou "REJECT|report_id"
     action, report_id = data.split("|", 1)
 
     info = PENDING.get(report_id)
@@ -254,9 +255,9 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "APPROVE":
         files = info["files"]
         text = (info["text"] or "").strip()
-        text_or_none = text if text else None
+        caption_for_public = text if text else None
 
-        # Cas : aucun média, juste du texte
+        # Cas : juste du texte
         if not files:
             if text:
                 await context.bot.send_message(
@@ -276,31 +277,31 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(
                     chat_id=PUBLIC_GROUP_ID,
                     photo=m["file_id"],
-                    caption=text_or_none
+                    caption=caption_for_public
                 )
             else:
                 await context.bot.send_video(
                     chat_id=PUBLIC_GROUP_ID,
                     video=m["file_id"],
-                    caption=text_or_none
+                    caption=caption_for_public
                 )
 
             await safe_edit(query, "✅ Publié dans le groupe public.")
             PENDING.pop(report_id, None)
             return
 
-        # Cas : plusieurs médias -> on publie un album dans le groupe public
+        # Cas : plusieurs médias -> album public
         media_group = []
         for i, m in enumerate(files):
             if m["type"] == "photo":
                 media_group.append(InputMediaPhoto(
                     media=m["file_id"],
-                    caption=text_or_none if i == 0 else None
+                    caption=caption_for_public if i == 0 else None
                 ))
             else:
                 media_group.append(InputMediaVideo(
                     media=m["file_id"],
-                    caption=text_or_none if i == 0 else None
+                    caption=caption_for_public if i == 0 else None
                 ))
 
         await context.bot.send_media_group(
@@ -313,21 +314,20 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def safe_edit(query, new_text: str):
-    # essaie d'éditer la légende (si c'était une photo/vidéo),
-    # sinon essaie d'éditer le texte du message bouton
+    # essaie d'éditer la légende du message bouton, sinon le texte
     try:
         await query.edit_message_caption(caption=new_text)
-    except:
+    except Exception:
         try:
             await query.edit_message_text(text=new_text)
-        except:
+        except Exception:
             pass
 
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # tous les messages envoyés au bot
+    # tout message au bot
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
     # clic sur ✅ / ❌
