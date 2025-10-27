@@ -455,36 +455,42 @@ def main():
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
     app.add_handler(CallbackQueryHandler(on_button_click))
 
-    # On lance les tâches de fond (worker + cleaner)
-    async def startup():
-        # lancer worker (file d'attente admin)
-        asyncio.create_task(worker_loop(app))
-        # lancer cleaner mémoire
-        asyncio.create_task(cleaner_loop())
-
-    # On démarre keep_alive dans un thread séparé (ping Render)
+    # --- keep alive Render (ping toutes les 10 min) ---
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # Boucle anti-crash: si Telegram pète, on relance
+    # --- worker_loop + cleaner_loop dans leur propre boucle async séparée ---
+    def bg_async_tasks():
+        # chaque thread doit avoir sa propre event loop asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def runner():
+            # on lance les deux tâches en parallèle dans CE loop
+            asyncio.create_task(worker_loop(app))
+            asyncio.create_task(cleaner_loop())
+
+            # boucle infinie pour garder le thread en vie
+            while True:
+                await asyncio.sleep(1)
+
+        loop.run_until_complete(runner())
+
+    threading.Thread(target=bg_async_tasks, daemon=True).start()
+
+    # --- boucle anti-crash pour le bot Telegram ---
     while True:
         try:
             print("🚀 Bot démarré, en écoute…")
-            # on initialise les tâches de fond avant polling
-            asyncio.run(startup())
-        except RuntimeError:
-            # RuntimeError "asyncio.run() cannot be called from a running event loop"
-            # si ça arrive, on ignore ce startup de plus
-            pass
-
-        try:
             app.run_polling(
                 poll_interval=POLL_INTERVAL,
                 timeout=POLL_TIMEOUT
             )
         except Exception as e:
             print(f"[CRASH] Bot a crash: {e}")
-            time.sleep(5)  # pause avant retry
+            time.sleep(5)  # pause puis retry
 
 
 if __name__ == "__main__":
     main()
+
+
