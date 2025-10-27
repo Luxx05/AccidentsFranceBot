@@ -328,6 +328,47 @@ def keep_alive():
             pass
         time.sleep(600)
 
+# ==================== CALLBACK BUTTONS ====================
+
+async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        data = query.data
+        msg = query.message
+        caption = msg.caption or msg.text or ""
+
+        if data == "approve":
+            # Publication validée → envoi dans le groupe public
+            try:
+                if msg.photo:
+                    await context.bot.send_photo(
+                        chat_id=PUBLIC_GROUP_ID,
+                        photo=msg.photo[-1].file_id,
+                        caption=caption,
+                    )
+                elif msg.video:
+                    await context.bot.send_video(
+                        chat_id=PUBLIC_GROUP_ID,
+                        video=msg.video.file_id,
+                        caption=caption,
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=PUBLIC_GROUP_ID,
+                        text=caption,
+                    )
+
+                await query.edit_message_text("✅ Publication envoyée dans le groupe public.")
+            except Exception as e:
+                await query.edit_message_text(f"⚠️ Erreur envoi public : {e}")
+
+        elif data == "reject":
+            await query.edit_message_text("❌ Signalement supprimé.")
+    except Exception as e:
+        print(f"Erreur bouton : {e}")
+
 
 # ================== MAIN ==================
 
@@ -384,6 +425,7 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 if __name__ == "__main__":
     start_bot_once()
+
 
 
 
