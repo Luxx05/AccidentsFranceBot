@@ -407,37 +407,30 @@ def keep_alive():
 # ================== MAIN ==================
 
 def main():
-    # démarrage keep alive (thread simple)
+    # démarrer le keep alive dans un thread
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # on construit l'application Telegram
+    # construire l'app Telegram
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # handlers
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
     app.add_handler(CallbackQueryHandler(on_button_click))
 
-    # IMPORTANT :
-    # on démarre worker_loop + cleaner_loop dans LA MÊME LOOP que Telegram
+    # lancer worker_loop + cleaner_loop DANS la boucle du bot
     async def post_init(application: ContextTypes.DEFAULT_TYPE):
-        # ces tâches tournent en fond dans la boucle asyncio interne du bot
         asyncio.create_task(worker_loop(application))
         asyncio.create_task(cleaner_loop())
 
-    app.post_init = post_init  # hook appelé au démarrage du polling
+    app.post_init = post_init
 
-    # boucle anti-crash
-    while True:
-        try:
-            print("🚀 Bot démarré, en écoute…")
-            app.run_polling(
-                poll_interval=POLL_INTERVAL,
-                timeout=POLL_TIMEOUT
-            )
-        except Exception as e:
-            print(f"[CRASH] Bot a crash: {e}")
-            time.sleep(5)
+    print("🚀 Bot démarré, en écoute…")
+    app.run_polling(
+        poll_interval=POLL_INTERVAL,
+        timeout=POLL_TIMEOUT
+    )
 
 
 if __name__ == "__main__":
     main()
+
