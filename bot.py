@@ -346,7 +346,12 @@ def main():
 
     app.run_polling(poll_interval=2.0)
 
+import time
+while True:
+    time.sleep(60)
+
 
 if __name__ == "__main__":
     main()
+
 
