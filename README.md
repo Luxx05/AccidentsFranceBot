@@ -1,8 +1,5 @@
 ![Bannière](https://github.com/Luxx05/AccidentsFranceBot/raw/main/assets/banner.png)
 
-<p align="center">
-  <img src="https://i.imgur.com/lCz3C0x.png" width="120" alt="Accidents France Logo"/>
-</p>
 
 <h1 align="center">🚨 Accidents France Bot</h1>
 <p align="center">
