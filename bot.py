@@ -123,14 +123,6 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
 # =========================================================
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    1. Quelqu'un envoie un message (texte/photo/vidéo ou album)
-    2. On construit un "report"
-    3. On l'empile dans REVIEW_QUEUE
-    4. On répond au user: "reçu"
-    -> IMPORTANT : si le message vient du groupe public, on NE republie pas automatiquement dans le groupe public,
-       on passe quand même par la review interne.
-    """
     msg = update.message
     if not msg:
         return
@@ -138,6 +130,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = msg.from_user
     chat_id = msg.chat_id
     media_group_id = msg.media_group_id  # album id ou None
+
+    # 🚫 ignore tout message venant du groupe public
+    if chat_id == PUBLIC_GROUP_ID:
+        return
 
     # anti-spam simple (sauf si album)
     if _is_spam(user.id, media_group_id):
@@ -147,13 +143,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
         return
 
-    # qui parle ?
     user_name = f"@{user.username}" if user.username else "anonyme"
-
-    # texte associé (caption > text > "")
     piece_text = (msg.caption or msg.text or "").strip()
 
-    # détecte média unique éventuel
     media_type = None
     file_id = None
     if msg.video:
@@ -163,36 +155,29 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         media_type = "photo"
         file_id = msg.photo[-1].file_id
 
-    # ===== CAS 1 : PAS ALBUM (media_group_id is None) =====
+    # ===== CAS 1 : PAS ALBUM =====
     if media_group_id is None:
         report_id = f"{chat_id}_{msg.id}"
-
-        # on prépare le contenu à modérer
         new_pending = {
             "files": [],
             "text": piece_text,
-            "from_public_group": _is_from_public_group(chat_id),
+            "from_public_group": False,
         }
-        if media_type in ("photo", "video") and file_id:
+        if media_type and file_id:
             new_pending["files"].append({"type": media_type, "file_id": file_id})
 
-        # on stocke
         PENDING[report_id] = new_pending
 
-        # on push dans la queue pour le worker modération
         REVIEW_QUEUE.put({
             "report_id": report_id,
             "preview_text": _make_admin_preview(user_name, piece_text, is_album=False),
             "files": new_pending["files"],
         })
 
-        # réponse user (privé OU public) -> pas grave si le msg est public,
-        # ça donnera un accusé du bot sous le msg.
         try:
-            await msg.reply_text("✅ Reçu. Vérif avant publication.")
+            await msg.reply_text("✅ Reçu. Vérif avant publication (anonyme).")
         except Exception:
             pass
-
         return
 
     # ===== CAS 2 : ALBUM =====
@@ -205,23 +190,20 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             "chat_id": chat_id,
             "ts": _now(),
             "done": False,
-            "from_public_group": _is_from_public_group(chat_id),
+            "from_public_group": False,
         }
         album = TEMP_ALBUMS[media_group_id]
 
-    # on stocke la pièce média si c'en est une
-    if media_type in ("photo", "video") and file_id:
+    if media_type and file_id:
         album["files"].append({"type": media_type, "file_id": file_id})
 
-    # si on n'avait pas encore de texte pour l'album, on prend celui-là
     if piece_text and not album["text"]:
         album["text"] = piece_text
 
-    # refresh timestamp
     album["ts"] = _now()
 
-    # lancer finalisation de l'album dans ~0.5s
     asyncio.create_task(finalize_album_later(media_group_id, context, msg))
+
 
 
 async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
@@ -543,3 +525,4 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
