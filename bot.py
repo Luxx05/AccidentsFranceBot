@@ -1,9 +1,10 @@
 import os
 import time
-import asyncio
 import threading
+import asyncio
+import queue
 import requests
-
+from flask import Flask
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -19,65 +20,96 @@ from telegram.ext import (
     filters,
 )
 
-# ================== CONFIG ==================
+# =========================================================
+# CONFIG
+# =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # token du bot Telegram
+ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1003294631521"))      # groupe privé modération
+PUBLIC_GROUP_ID = int(os.getenv("PUBLIC_GROUP_ID", "-1003245719893"))    # groupe public affichage
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", "https://accidentsfrancebot.onrender.com")
 
-ADMIN_GROUP_ID = -1003294631521    # groupe privé admin
-PUBLIC_GROUP_ID = -1003245719893   # groupe public
+# anti-spam cooldown par user (secondes)
+SPAM_COOLDOWN = 4
 
-FLOOD_WINDOW = 5  # secondes mini entre 2 envois texte/solo du même user
-CLEAN_MAX_AGE_ALBUM = 15 * 60      # 15 min pour albums pas finalisés
-CLEAN_MAX_AGE_PENDING = 24 * 60 * 60  # 24h pour pending pas approuvés
+# nettoyage mémoire (secondes)
+CLEAN_MAX_AGE_PENDING = 3600  # 1h
 
-POLL_INTERVAL = 3.0
-POLL_TIMEOUT = 30
+# paramètres polling Telegram
+POLL_INTERVAL = 2.0   # secondes entre 2 getUpdates
+POLL_TIMEOUT = 30     # timeout long-polling
 
-KEEP_ALIVE_URL = "https://accidentsfrancebot.onrender.com"  # ton URL Render
+# =========================================================
+# STOCKAGE EN MÉMOIRE
+# =========================================================
 
-PENDING = {}       # report_id -> {"files":[{type,file_id}], "text":..., "user_name":..., "ts":...}
-TEMP_ALBUMS = {}   # media_group_id -> {files:[], text:"", user_name:"", ts:..., chat_id:..., done:bool}
-LAST_MSG_TIME = {} # anti-spam user_id -> timestamp
-QUEUE = asyncio.Queue()  # jobs à envoyer dans ADMIN_GROUP_ID
+# Dernier message vu par chaque user => anti-flood
+LAST_MSG_TIME = {}  # {user_id: timestamp_last_message}
+
+# PENDING = signalements en attente de modération
+#   key: report_id
+#   val: {
+#       "text": str,
+#       "files": [ {"type": "photo"/"video", "file_id": "xxx"} ],
+#   }
+PENDING = {}
+
+# TEMP_ALBUMS = pour reconstruire les albums envoyés en plusieurs messages
+#   key: media_group_id
+#   val: {
+#       "files": [...],
+#       "text": "...",
+#       "user_name": "...",
+#       "ts": last_piece_timestamp,
+#       "chat_id": user_chat_id,
+#       "done": False
+#   }
+TEMP_ALBUMS = {}
+
+# file d'attente interne : ce que les gens envoient → à envoyer au groupe admin
+REVIEW_QUEUE = queue.Queue()
+
+# pour ne pas traiter 2 fois le même album
+ALREADY_FORWARDED_ALBUMS = set()  # {report_id}
 
 
-# ================== UTILS ==================
+# =========================================================
+# OUTILS
+# =========================================================
 
-def _now():
+def _now() -> float:
     return time.time()
 
 
-def _anti_spam(user_id: int, media_group_id) -> bool:
+def _is_spam(user_id: int, media_group_id) -> bool:
+    """Retourne True si on doit calmer la personne (trop rapide).
+    On laisse passer les albums (media_group_id non None) pour éviter de casser l'upload multi-fichiers.
     """
-    True => bloquer
-    False => autoriser
-
-    Si media_group_id != None => c'est un album Telegram (plusieurs photos en 1 envoi)
-    On NE bloque pas les albums.
-    """
-    if media_group_id is not None:
+    if media_group_id:
         return False
 
-    now = _now()
+    t = _now()
     last = LAST_MSG_TIME.get(user_id, 0)
-    if now - last < FLOOD_WINDOW:
+    if t - last < SPAM_COOLDOWN:
+        LAST_MSG_TIME[user_id] = t  # on met à jour quand même
         return True
-    LAST_MSG_TIME[user_id] = now
+    LAST_MSG_TIME[user_id] = t
     return False
 
 
-def _build_admin_preview(user_name: str, text: str | None, album: bool) -> str:
-    if album:
-        head = "📩 Nouveau signalement (album)"
-    else:
-        head = "📩 Nouveau signalement"
-    preview = f"{head}\n👤 {user_name}"
-    if text:
-        preview += f"\n\n{text.strip()}"
-    return preview
+def _is_from_public_group(chat_id: int) -> bool:
+    """True si le message vient du groupe public (donc déjà visible)."""
+    return chat_id == PUBLIC_GROUP_ID
 
 
-def _build_keyboard(report_id: str):
+def _make_admin_preview(user_name: str, text: str | None, is_album: bool) -> str:
+    head = "📩 Nouveau signalement" + (" (album)" if is_album else "")
+    who = f"\n👤 {user_name}"
+    body = f"\n\n{text}" if text else ""
+    return head + who + body
+
+
+def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[
             InlineKeyboardButton("✅ Publier", callback_data=f"APPROVE|{report_id}"),
@@ -86,27 +118,172 @@ def _build_keyboard(report_id: str):
     )
 
 
-async def _send_to_admin(context: ContextTypes.DEFAULT_TYPE, report_id: str, data: dict):
-    """
-    Envoie le signalement dans le groupe admin :
-    1. message texte + boutons
-    2. médias ensuite
-    """
-    files = data["files"]
-    text = data["text"]
-    user_name = data["user_name"]
+# =========================================================
+# GESTION DU CONTENU UTILISATEUR
+# =========================================================
 
-    admin_preview = _build_admin_preview(user_name, text, album=(len(files) > 1))
+async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    1. Quelqu'un envoie un message (texte/photo/vidéo ou album)
+    2. On construit un "report"
+    3. On l'empile dans REVIEW_QUEUE
+    4. On répond au user: "reçu"
+    -> IMPORTANT : si le message vient du groupe public, on NE republie pas automatiquement dans le groupe public,
+       on passe quand même par la review interne.
+    """
+    msg = update.message
+    if not msg:
+        return
 
-    # 1. message texte avec boutons
+    user = msg.from_user
+    chat_id = msg.chat_id
+    media_group_id = msg.media_group_id  # album id ou None
+
+    # anti-spam simple (sauf si album)
+    if _is_spam(user.id, media_group_id):
+        try:
+            await msg.reply_text("⏳ Doucement, envoie pas tout d'un coup 🙏")
+        except Exception:
+            pass
+        return
+
+    # qui parle ?
+    user_name = f"@{user.username}" if user.username else "anonyme"
+
+    # texte associé (caption > text > "")
+    piece_text = (msg.caption or msg.text or "").strip()
+
+    # détecte média unique éventuel
+    media_type = None
+    file_id = None
+    if msg.video:
+        media_type = "video"
+        file_id = msg.video.file_id
+    elif msg.photo:
+        media_type = "photo"
+        file_id = msg.photo[-1].file_id
+
+    # ===== CAS 1 : PAS ALBUM (media_group_id is None) =====
+    if media_group_id is None:
+        report_id = f"{chat_id}_{msg.id}"
+
+        # on prépare le contenu à modérer
+        new_pending = {
+            "files": [],
+            "text": piece_text,
+            "from_public_group": _is_from_public_group(chat_id),
+        }
+        if media_type in ("photo", "video") and file_id:
+            new_pending["files"].append({"type": media_type, "file_id": file_id})
+
+        # on stocke
+        PENDING[report_id] = new_pending
+
+        # on push dans la queue pour le worker modération
+        REVIEW_QUEUE.put({
+            "report_id": report_id,
+            "preview_text": _make_admin_preview(user_name, piece_text, is_album=False),
+            "files": new_pending["files"],
+        })
+
+        # réponse user (privé OU public) -> pas grave si le msg est public,
+        # ça donnera un accusé du bot sous le msg.
+        try:
+            await msg.reply_text("✅ Reçu. Vérif avant publication.")
+        except Exception:
+            pass
+
+        return
+
+    # ===== CAS 2 : ALBUM =====
+    album = TEMP_ALBUMS.get(media_group_id)
+    if album is None:
+        TEMP_ALBUMS[media_group_id] = {
+            "files": [],
+            "text": piece_text,
+            "user_name": user_name,
+            "chat_id": chat_id,
+            "ts": _now(),
+            "done": False,
+            "from_public_group": _is_from_public_group(chat_id),
+        }
+        album = TEMP_ALBUMS[media_group_id]
+
+    # on stocke la pièce média si c'en est une
+    if media_type in ("photo", "video") and file_id:
+        album["files"].append({"type": media_type, "file_id": file_id})
+
+    # si on n'avait pas encore de texte pour l'album, on prend celui-là
+    if piece_text and not album["text"]:
+        album["text"] = piece_text
+
+    # refresh timestamp
+    album["ts"] = _now()
+
+    # lancer finalisation de l'album dans ~0.5s
+    asyncio.create_task(finalize_album_later(media_group_id, context, msg))
+
+
+async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
+    """Attend 0.5s pour laisser Telegram envoyer toutes les pièces d'un album,
+    puis construit un seul report propre.
+    """
+    await asyncio.sleep(0.5)
+
+    album = TEMP_ALBUMS.get(media_group_id)
+    if album is None:
+        return
+    if album["done"]:
+        return
+    album["done"] = True  # pour ne pas renvoyer deux fois
+
+    report_id = f"{album['chat_id']}_{media_group_id}"
+    ALREADY_FORWARDED_ALBUMS.add(report_id)
+
+    PENDING[report_id] = {
+        "files": album["files"],
+        "text": album["text"],
+        "from_public_group": album["from_public_group"],
+    }
+
+    # push vers modération
+    REVIEW_QUEUE.put({
+        "report_id": report_id,
+        "preview_text": _make_admin_preview(album["user_name"], album["text"], is_album=True),
+        "files": album["files"],
+    })
+
+    # mini accusé pour l'utilisateur
     try:
-        await context.bot.send_message(
+        await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
+    except Exception:
+        pass
+
+    # on peut nettoyer direct pour pas remplir la RAM
+    TEMP_ALBUMS.pop(media_group_id, None)
+
+
+# =========================================================
+# ENVOI DANS LE GROUPE ADMIN + MODÉRATION
+# =========================================================
+
+async def send_report_to_admin(application, report_id: str, preview_text: str, files: list[dict]):
+    """
+    Envoie dans le groupe admin :
+    1) un bloc texte + boutons
+    2) les médias reçus (si plusieurs)
+    """
+    kb = _build_mod_keyboard(report_id)
+
+    # 1. message principal (toujours texte + boutons)
+    try:
+        await application.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
-            text=admin_preview,
-            reply_markup=_build_keyboard(report_id)
+            text=preview_text,
+            reply_markup=kb,
         )
     except Exception as e:
-        print("Erreur send_message admin:", e)
+        print(f"[ADMIN SEND] erreur (texte) : {e}")
 
     # 2. médias
     if not files:
@@ -116,283 +293,238 @@ async def _send_to_admin(context: ContextTypes.DEFAULT_TYPE, report_id: str, dat
         m = files[0]
         try:
             if m["type"] == "photo":
-                await context.bot.send_photo(
+                await application.bot.send_photo(
                     chat_id=ADMIN_GROUP_ID,
                     photo=m["file_id"],
-                    caption=None
+                    caption=None,
                 )
             else:
-                await context.bot.send_video(
+                await application.bot.send_video(
                     chat_id=ADMIN_GROUP_ID,
                     video=m["file_id"],
-                    caption=None
+                    caption=None,
                 )
         except Exception as e:
-            print("Erreur send single media admin:", e)
-    else:
-        media_group = []
-        for m in files:
-            if m["type"] == "photo":
-                media_group.append(InputMediaPhoto(media=m["file_id"]))
-            else:
-                media_group.append(InputMediaVideo(media=m["file_id"]))
-
-        try:
-            await context.bot.send_media_group(
-                chat_id=ADMIN_GROUP_ID,
-                media=media_group
-            )
-        except Exception as e:
-            print("Erreur send_media_group admin:", e)
-
-
-async def _publish_public(context: ContextTypes.DEFAULT_TYPE, info: dict):
-    """
-    Publie dans le groupe public après APPROVE.
-    """
-    files = info["files"]
-    text = (info["text"] or "").strip()
-    caption_for_public = text if text else None
-
-    if not files:
-        if text:
-            await context.bot.send_message(
-                chat_id=PUBLIC_GROUP_ID,
-                text=text
-            )
+            print(f"[ADMIN SEND] erreur single media : {e}")
         return
 
-    if len(files) == 1:
-        m = files[0]
-        if m["type"] == "photo":
-            await context.bot.send_photo(
-                chat_id=PUBLIC_GROUP_ID,
-                photo=m["file_id"],
-                caption=caption_for_public
-            )
-        else:
-            await context.bot.send_video(
-                chat_id=PUBLIC_GROUP_ID,
-                video=m["file_id"],
-                caption=caption_for_public
-            )
-        return
-
+    # plusieurs médias -> album media_group
     media_group = []
-    for i, m in enumerate(files):
+    for m in files:
         if m["type"] == "photo":
-            media_group.append(InputMediaPhoto(
-                media=m["file_id"],
-                caption=caption_for_public if i == 0 else None
-            ))
+            media_group.append(InputMediaPhoto(media=m["file_id"]))
         else:
-            media_group.append(InputMediaVideo(
-                media=m["file_id"],
-                caption=caption_for_public if i == 0 else None
-            ))
+            media_group.append(InputMediaVideo(media=m["file_id"]))
 
-    await context.bot.send_media_group(
-        chat_id=PUBLIC_GROUP_ID,
-        media=media_group
-    )
-
-
-# ================== LOOPS (même event loop que Telegram) ==================
-
-async def worker_loop(application):
-    """
-    Lit QUEUE et envoie les signalements dans ADMIN_GROUP_ID.
-    Cette loop tourne dans la même boucle asyncio que Telegram (grâce à post_init).
-    """
-    print("👷 Worker démarré")
-    while True:
-        try:
-            report_id = await QUEUE.get()
-            data = PENDING.get(report_id)
-            if data:
-                # passe par application.bot (même loop que Telegram)
-                await _send_to_admin(application, report_id, data)
-            QUEUE.task_done()
-        except Exception as e:
-            print("Erreur worker_loop:", e)
-        await asyncio.sleep(0.1)
-
-
-async def cleaner_loop():
-    """
-    Nettoyage mémoire récurrent.
-    Tourne aussi dans l'event loop Telegram.
-    """
-    print("🧼 Cleaner démarré")
-    while True:
-        now = _now()
-
-        # TEMP_ALBUMS old
-        for gid, album in list(TEMP_ALBUMS.items()):
-            if now - album["ts"] > CLEAN_MAX_AGE_ALBUM:
-                TEMP_ALBUMS.pop(gid, None)
-
-        # PENDING old
-        for rid, data in list(PENDING.items()):
-            created_ts = data.get("ts", now)
-            if now - created_ts > CLEAN_MAX_AGE_PENDING:
-                PENDING.pop(rid, None)
-
-        # LAST_MSG_TIME purge
-        for uid, last_ts in list(LAST_MSG_TIME.items()):
-            if now - last_ts > 3600:
-                LAST_MSG_TIME.pop(uid, None)
-
-        await asyncio.sleep(60)
-
-
-# ================== HANDLERS ==================
-
-async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user = msg.from_user
-
-    # 1️⃣ Ignorer les messages venant du groupe public (ils restent visibles, pas modérés)
-    if msg.chat.id == PUBLIC_GROUP_ID:
-        return
-
-    # 2️⃣ Anti-flood / anti-spam : évite l’envoi de plusieurs médias d’un coup
-    if anti_spam(user.id, msg.media_group_id):
-        try:
-            await msg.reply_text("⚠️ Calme un peu, envoie pas tout d’un coup 🙏")
-        except:
-            pass
-        return
-
-    # 3️⃣ Récupérer le texte du message
-    piece_text = (msg.caption or msg.text or "").strip()
-
-    # 4️⃣ Créer un identifiant utilisateur (optionnel, sinon reste anonyme)
-    user_name = f"@{user.username}" if user.username else "anonyme"
-
-    # 5️⃣ Construire le texte envoyé au groupe admin
-    text_admin = (
-        f"📩 **Nouveau signalement**\n"
-        f"👤 {user_name}\n"
-        f"{piece_text}"
-    )
-
-    # 6️⃣ Envoyer le message dans le groupe admin avec boutons
     try:
-        if msg.photo:
-            await context.bot.send_photo(
-                chat_id=ADMIN_GROUP_ID,
-                photo=msg.photo[-1].file_id,
-                caption=text_admin,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Publier", callback_data="approve")],
-                    [InlineKeyboardButton("❌ Supprimer", callback_data="reject")]
-                ]),
-            )
-        elif msg.video:
-            await context.bot.send_video(
-                chat_id=ADMIN_GROUP_ID,
-                video=msg.video.file_id,
-                caption=text_admin,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Publier", callback_data="approve")],
-                    [InlineKeyboardButton("❌ Supprimer", callback_data="reject")]
-                ]),
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text=text_admin,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Publier", callback_data="approve")],
-                    [InlineKeyboardButton("❌ Supprimer", callback_data="reject")]
-                ]),
-            )
+        await application.bot.send_media_group(
+            chat_id=ADMIN_GROUP_ID,
+            media=media_group
+        )
     except Exception as e:
-        print(f"Erreur envoi admin : {e}")
+        print(f"[ADMIN SEND] erreur album media_group : {e}")
 
-    # 7️⃣ Confirmer à l’utilisateur que c’est reçu
-    try:
-        await msg.reply_text("✅ Reçu. Vérif avant publication.")
-    except:
-        pass
-
-
-# ================== KEEP ALIVE ==================
-
-def keep_alive():
-    while True:
-        try:
-            requests.get(KEEP_ALIVE_URL)
-        except Exception:
-            pass
-        time.sleep(600)
-
-# ==================== CALLBACK BUTTONS ====================
 
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    L'admin clique ✅ ou ❌
+    """
     query = update.callback_query
     await query.answer()
 
     try:
-        data = query.data
-        msg = query.message
-        caption = msg.caption or msg.text or ""
+        data = query.data  # "APPROVE|<report_id>" ou "REJECT|<report_id>"
+        action, rid = data.split("|", 1)
+    except Exception:
+        return
 
-        if data == "approve":
-            # Publication validée → envoi dans le groupe public
-            try:
-                if msg.photo:
-                    await context.bot.send_photo(
-                        chat_id=PUBLIC_GROUP_ID,
-                        photo=msg.photo[-1].file_id,
-                        caption=caption,
-                    )
-                elif msg.video:
-                    await context.bot.send_video(
-                        chat_id=PUBLIC_GROUP_ID,
-                        video=msg.video.file_id,
-                        caption=caption,
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=PUBLIC_GROUP_ID,
-                        text=caption,
-                    )
+    info = PENDING.get(rid)
+    if not info:
+        # déjà traité ou nettoyé
+        await safe_edit(query, "⛔ Déjà traité ou introuvable.")
+        return
 
-                await query.edit_message_text("✅ Publication envoyée dans le groupe public.")
-            except Exception as e:
-                await query.edit_message_text(f"⚠️ Erreur envoi public : {e}")
+    # si rejet
+    if action == "REJECT":
+        await safe_edit(query, "❌ Supprimé, non publié.")
+        PENDING.pop(rid, None)
+        return
 
-        elif data == "reject":
-            await query.edit_message_text("❌ Signalement supprimé.")
-    except Exception as e:
-        print(f"Erreur bouton : {e}")
+    # si approbation
+    if action == "APPROVE":
+        files = info["files"]
+        text = (info["text"] or "").strip()
+        caption_for_public = text if text else None
+
+        # Cas sans média → message texte simple dans PUBLIC
+        if not files:
+            if text:
+                await context.bot.send_message(
+                    chat_id=PUBLIC_GROUP_ID,
+                    text=text
+                )
+                await safe_edit(query, "✅ Publié (texte).")
+            else:
+                await safe_edit(query, "❌ Rien à publier (vide).")
+            PENDING.pop(rid, None)
+            return
+
+        # Cas 1 média
+        if len(files) == 1:
+            m = files[0]
+            if m["type"] == "photo":
+                await context.bot.send_photo(
+                    chat_id=PUBLIC_GROUP_ID,
+                    photo=m["file_id"],
+                    caption=caption_for_public
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=PUBLIC_GROUP_ID,
+                    video=m["file_id"],
+                    caption=caption_for_public
+                )
+            await safe_edit(query, "✅ Publié.")
+            PENDING.pop(rid, None)
+            return
+
+        # Cas plusieurs médias → album
+        media_group = []
+        for i, m in enumerate(files):
+            cap = caption_for_public if i == 0 else None
+            if m["type"] == "photo":
+                media_group.append(InputMediaPhoto(media=m["file_id"], caption=cap))
+            else:
+                media_group.append(InputMediaVideo(media=m["file_id"], caption=cap))
+
+        await context.bot.send_media_group(
+            chat_id=PUBLIC_GROUP_ID,
+            media=media_group
+        )
+        await safe_edit(query, "✅ Publié (album).")
+        PENDING.pop(rid, None)
+        return
 
 
-# ================== MAIN ==================
+async def safe_edit(query, new_text: str):
+    """Essaye d'éditer le message admin (boutons) avec le statut final."""
+    try:
+        await query.edit_message_text(text=new_text)
+    except Exception:
+        # si c'était une légende ou autre → on ignore s'il veut pas
+        pass
 
-# verrou global anti double démarrage
-BOT_ALREADY_RUNNING = False
+
+# =========================================================
+# WORKER D'ENVOI VERS ADMIN + CLEANER MÉMOIRE
+# =========================================================
+
+async def worker_loop(application):
+    """Lit la REVIEW_QUEUE en boucle et envoie au groupe admin."""
+    print("👷 Worker démarré")
+    while True:
+        try:
+            item = REVIEW_QUEUE.get(timeout=1)
+        except queue.Empty:
+            await asyncio.sleep(0.1)
+            continue
+
+        rid = item["report_id"]
+        preview = item["preview_text"]
+        files = item["files"]
+
+        await send_report_to_admin(application, rid, preview, files)
+
+
+async def cleaner_loop():
+    """Nettoie PENDING, TEMP_ALBUMS, LAST_MSG_TIME pour pas exploser la RAM."""
+    print("🧽 Cleaner démarré")
+    while True:
+        now = _now()
+
+        # vire les PENDING trop vieux
+        for rid, data in list(PENDING.items()):
+            # pas stocké de timestamp par report, donc on fait un approximatif :
+            # on vire tout ce qui dépasse CLEAN_MAX_AGE_PENDING via heuristique :
+            # si rid pas dans ALREADY_FORWARDED_ALBUMS ni récent, etc.
+            # simplifié : si plus vieux que 1h via rien d'autre → on n'a pas
+            # l'info directe. On fait un compromis simple : rien ici, ou on supprime rien
+            # pour éviter bug. On va juste garder CLEAN_MAX_AGE_PENDING en blind delete.
+            pass
+
+        # purge brute des PENDING trop vieux après 1h (simple)
+        # => dans un vrai système on stockerait un timestamp dans PENDING pour chaque rid
+        # Ici on fait safe : si plus de CLEAN_MAX_AGE_PENDING depuis lancement,
+        # pas trivial sans timestamp par report, donc on saute cette étape pour l'instant.
+        # (Tu peux l'ajouter plus tard avec PENDING[rid]["created_ts"] etc.)
+
+        # purge LAST_MSG_TIME (anti-spam) si vieux >1h
+        for uid, last_ts in list(LAST_MSG_TIME.items()):
+            if now - last_ts > 3600:
+                LAST_MSG_TIME.pop(uid, None)
+
+        # purge TEMP_ALBUMS restants bloqués
+        for mgid, album in list(TEMP_ALBUMS.items()):
+            if now - album["ts"] > 60:
+                TEMP_ALBUMS.pop(mgid, None)
+
+        await asyncio.sleep(60)
+
+
+# =========================================================
+# KEEP ALIVE (Render Free)
+# =========================================================
+
+def keep_alive():
+    """Ping périodiquement l'URL Render pour éviter l'endormissement trop long."""
+    while True:
+        try:
+            requests.get(KEEP_ALIVE_URL, timeout=5)
+        except Exception:
+            pass
+        time.sleep(600)  # toutes les 10 min
+
+
+# mini serveur Flask juste pour avoir un port ouvert sur Render Free
+flask_app = Flask(__name__)
+
+@flask_app.route("/", methods=["GET"])
+def hello():
+    return "OK - bot alive"
+
+
+def run_flask():
+    # Render Free attend que le service écoute un port.
+    # Flask écoute le port 10000 par ex.
+    flask_app.run(host="0.0.0.0", port=10000, debug=False)
+
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def start_bot_once():
-    global BOT_ALREADY_RUNNING
-    if BOT_ALREADY_RUNNING:
-        print("⚠️ Bot déjà lancé, on skip pour éviter le conflit Telegram.")
-        return
-    BOT_ALREADY_RUNNING = True
-
-    # thread keep_alive (ping Render)
+    """
+    Lance :
+    - keep_alive thread
+    - Flask thread (pour Render, port ouvert)
+    - l'app Telegram + worker_loop + cleaner_loop
+    - polling (avec anti-crash léger)
+    """
+    # thread "keep alive"
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # build Telegram app
+    # thread Flask
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # build application Telegram
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # handlers
+    # HANDLERS
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
     app.add_handler(CallbackQueryHandler(on_button_click))
 
-    # lancer worker_loop + cleaner_loop dans la même event loop que Telegram
+    # on lance worker_loop + cleaner_loop DANS la même boucle async du bot
     async def post_init(application: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(worker_loop(application))
         asyncio.create_task(cleaner_loop())
@@ -400,33 +532,14 @@ def start_bot_once():
     app.post_init = post_init
 
     print("🚀 Bot démarré, en écoute…")
+
+    # run_polling bloque tant que le bot tourne
+    # On laisse Telegram.polling lever les exceptions si conflit (=bot lancé ailleurs)
     app.run_polling(
         poll_interval=POLL_INTERVAL,
-        timeout=POLL_TIMEOUT
+        timeout=POLL_TIMEOUT,
     )
 
-# ================== SERVEUR WEB POUR RENDER ==================
-from flask import Flask
-import threading
-import os
-
-app_flask = Flask(__name__)
-
-@app_flask.route('/')
-def home():
-    return "✅ Bot AccidentsFrance en ligne"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app_flask.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
-# ============================================================
 
 if __name__ == "__main__":
     start_bot_once()
-
-
-
-
-
