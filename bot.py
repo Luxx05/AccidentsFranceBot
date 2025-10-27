@@ -368,8 +368,22 @@ def main():
     print("🚀 Bot démarré, en écoute…")
     app.run_polling(poll_interval=2.0)
 
+import threading
+import requests
+
+def keep_alive():
+    while True:
+        try:
+            # remplace l’URL ci-dessous par celle de ton service Render
+            requests.get("https://accidentsfrancebot.onrender.com")
+        except:
+            pass
+        time.sleep(600)  # toutes les 10 min
+
+threading.Thread(target=keep_alive, daemon=True).start()
 
 if __name__ == "__main__":
     main()
     # pas de while True ici
     # run_polling() bloque déjà le process tant que le bot tourne
+
