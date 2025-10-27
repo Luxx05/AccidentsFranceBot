@@ -439,8 +439,26 @@ def start_bot_once():
         timeout=POLL_TIMEOUT
     )
 
+# ================== SERVEUR WEB POUR RENDER ==================
+from flask import Flask
+import threading
+import os
+
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "✅ Bot AccidentsFrance en ligne"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app_flask.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask, daemon=True).start()
+# ============================================================
 
 if __name__ == "__main__":
     start_bot_once()
+
 
 
