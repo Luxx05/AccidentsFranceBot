@@ -1,3 +1,5 @@
+![Bannière](https://github.com/Luxx05/AccidentsFranceBot/raw/main/assets/banner.png)
+
 <p align="center">
   <img src="https://i.imgur.com/lCz3C0x.png" width="120" alt="Accidents France Logo"/>
 </p>
@@ -15,8 +17,8 @@
   <a href="https://t.me/AccidentsFR">
     <img src="https://img.shields.io/badge/Telegram-Community-blue?style=flat-square&logo=telegram" alt="Telegram"/>
   </a>
-  <a href="https://github.com/tonpseudo/accidents-france-bot">
-    <img src="https://img.shields.io/github/license/tonpseudo/accidents-france-bot?style=flat-square" alt="License"/>
+  <a href="https://github.com/Luxx05/AccidentsFranceBot">
+    <img src="https://img.shields.io/github/license/Luxx05/AccidentsFranceBot?style=flat-square" alt="License"/>
   </a>
 </p>
 
@@ -40,6 +42,7 @@
 | `requirements.txt` | Dépendances Python |
 | `Dockerfile` | Configuration Render |
 | `README.md` | Documentation du projet |
+| `assets/banner.png` | Bannière GitHub |
 
 ---
 
@@ -61,5 +64,5 @@
 ---
 
 <p align="center">
-  <i>Projet créé pour partager les scènes réelles sur les routes françaises — sans filtre, sans fake.</i>
+  <i>Projet développé pour centraliser les signalements d'accidents et radars.</i>
 </p>
