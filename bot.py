@@ -131,6 +131,82 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = msg.chat_id
     media_group_id = msg.media_group_id  # album id ou None
 
+        # === Anti-spam intelligent dans le groupe public ===
+    if msg.chat.type in ["group", "supergroup"] and chat_id == PUBLIC_GROUP_ID:
+        user_id = user.id
+        text = (msg.text or msg.caption or "").strip().lower()
+
+        now_ts = _now()
+        user_state = SPAM_COUNT.get(user_id, {"count": 0, "last": 0})
+
+        # 1. Détection flood (messages trop rapprochés)
+        is_flood = False
+        if _is_spam(user_id, media_group_id):
+            is_flood = True
+
+        # 2. Détection message "random clavier" genre "djdjdjdjfjf"
+        is_gibberish = False
+        if text and len(text) >= 5:
+            consonnes = sum(1 for c in text if c in "bcdfghjklmnpqrstvwxyz")
+            voyelles = sum(1 for c in text if c in "aeiouy")
+            ratio = consonnes / (voyelles + 1)
+            # si le message est quasi que des consonnes => probablement du spam dégueu
+            if ratio > 5:
+                is_gibberish = True
+
+        # Si flood OU charabia => on supprime le message
+        if is_flood or is_gibberish:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+            # on incrémente le compteur perso
+            # si +10s depuis dernier spam, on "détend" un peu le compteur
+            if now_ts - user_state["last"] > 10:
+                user_state["count"] = 0
+
+            user_state["count"] += 1
+            user_state["last"] = now_ts
+            SPAM_COUNT[user_id] = user_state
+
+            # si trop relou -> on mute
+            if user_state["count"] >= MUTE_THRESHOLD:
+                # on reset direct pour pas remuter en boucle
+                SPAM_COUNT[user_id] = {"count": 0, "last": now_ts}
+
+                until_ts = int(now_ts + MUTE_DURATION_SEC)
+
+                try:
+                    await context.bot.restrict_chat_member(
+                        chat_id=PUBLIC_GROUP_ID,
+                        user_id=user_id,
+                        permissions={  # pas le droit d'envoyer
+                            "can_send_messages": False,
+                            "can_send_media_messages": False,
+                            "can_send_other_messages": False,
+                            "can_add_web_page_previews": False
+                        },
+                        until_date=until_ts
+                    )
+
+                    # message d'info pour les modos (dans admin group)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_GROUP_ID,
+                            text=f"🔇 Utilisateur {user_id} temporairement mute ({MUTE_DURATION_SEC//60} min) pour spam."
+                        )
+                    except Exception:
+                        pass
+
+                except Exception:
+                    # pas grave si ça fail (genre bot pas assez admin)
+                    pass
+
+            # on sort, on ne traite pas ce message plus loin
+            return
+    # === fin anti-spam groupe public ===
+
     # 🚫 ignore tout message venant du groupe public
     if chat_id == PUBLIC_GROUP_ID:
         return
@@ -525,4 +601,5 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
 
