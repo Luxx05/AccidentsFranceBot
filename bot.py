@@ -36,7 +36,7 @@ PENDING = {}
 #   "user_name": "...",
 #   "ts": timestamp_last_piece,
 #   "chat_id": chat_id,
-#   "done": False    # <--- nouveau, pour éviter le spam
+#   "done": False    # pour éviter le spam multiple
 # }
 TEMP_ALBUMS = {}
 # =============================
@@ -47,27 +47,34 @@ def _now():
 
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Reçoit ce que l'utilisateur envoie au bot:
+    - texte seul
+    - 1 photo / 1 vidéo
+    - album (plusieurs médias envoyés d'un coup)
+    Envoie ensuite un "preview" dans le groupe admin avec boutons Publier / Supprimer.
+    """
     msg = update.message
     user = msg.from_user
 
-    # texte envoyé par l'utilisateur (caption média OU message texte)
+    # texte associé (caption d'un média OU message texte normal)
     piece_text = (msg.caption or msg.text or "").strip()
     user_name = f"@{user.username}" if user.username else "anonyme"
 
-    # Détecter média
+    # Détecter le média
     if msg.video:
         media_type = "video"
         file_id = msg.video.file_id
     elif msg.photo:
         media_type = "photo"
-        file_id = msg.photo[-1].file_id
+        file_id = msg.photo[-1].file_id  # meilleure qualité
     else:
         media_type = "text"
         file_id = None
 
     media_group_id = msg.media_group_id  # None si pas album
 
-    # ----- CAS 1 : message simple (pas album) -----
+    # ----- CAS 1 : message simple (PAS album) -----
     if media_group_id is None:
         report_id = f"{msg.chat_id}_{msg.id}"
 
@@ -117,7 +124,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         # réponse user
-        await msg.reply_text("✅ Reçu. Merci. Vérif avant publication.")
+        try:
+            await msg.reply_text("✅ Reçu. Merci. Vérif avant publication.")
+        except Exception:
+            pass
+
         return
 
     # ----- CAS 2 : album (plusieurs médias envoyés en une fois) -----
@@ -130,7 +141,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             "user_name": user_name,
             "ts": _now(),
             "chat_id": msg.chat_id,
-            "done": False,  # nouvel indicateur
+            "done": False,  # évite le spam multiple
         }
         album = TEMP_ALBUMS[media_group_id]
 
@@ -141,7 +152,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             "file_id": file_id,
         })
 
-    # si du texte arrive et qu'on n'en avait pas encore
+    # Garde le texte si on l'a pas encore
     if piece_text and not album["text"]:
         album["text"] = piece_text
 
@@ -154,23 +165,26 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
-    # Laisse Telegram envoyer toutes les pièces (0.5s)
+    """
+    Après réception d'un album (plusieurs photos/vidéos),
+    on attend un tout petit peu pour être sûr d'avoir tout reçu,
+    puis on envoie UNE SEULE preview dans l'admin (pour éviter le spam).
+    """
     await asyncio.sleep(0.5)
 
     album = TEMP_ALBUMS.get(media_group_id)
     if album is None:
         return
 
-    # si déjà traité, on ne renvoie pas encore une fois
+    # si déjà traité => on ne renvoie pas
     if album.get("done"):
         return
 
-    # on marque "envoyé"
     album["done"] = True
 
     report_id = f"{album['chat_id']}_{media_group_id}"
 
-    # Sauvegarde pour plus tard (publication)
+    # On stocke pour l'action APPROVE/REJECT plus tard
     PENDING[report_id] = {
         "files": album["files"],
         "text": album["text"],
@@ -189,8 +203,7 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 
     files = album["files"]
 
-    # ENVOI ADMIN :
-    # On commence par le message avec le texte + les boutons (très important pour toi)
+    # 1. on envoie d'abord le message texte avec les boutons dans le groupe admin
     try:
         await context.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
@@ -198,10 +211,9 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
             reply_markup=keyboard
         )
     except Exception:
-        # ignore si réseau lent
         pass
 
-    # Ensuite on envoie les médias reçus (sans bouton)
+    # 2. ensuite on envoie les médias (sans boutons)
     if len(files) == 1:
         m = files[0]
         try:
@@ -235,11 +247,10 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-    # on laisse l'album encore dispo dans TEMP_ALBUMS pour debug si besoin,
-    # mais on pourrait aussi le pop ici. On va le pop pour pas saturer la RAM.
+    # on libère l'album de la RAM
     TEMP_ALBUMS.pop(media_group_id, None)
 
-    # répondre à l'utilisateur une seule fois
+    # on répond à l'utilisateur UNE seule fois
     try:
         await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
     except Exception:
@@ -247,6 +258,10 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 
 
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Quand toi (admin) tu cliques sur ✅ Publier ou ❌ Supprimer.
+    On publie dans le groupe public si APPROVE.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -325,7 +340,10 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def safe_edit(query, new_text: str):
-    # essaie d'éditer la légende du message bouton, sinon le texte
+    """
+    Essaie d'éditer le message des boutons pour dire "✅ Publié" / "❌ Supprimé".
+    On tente caption puis texte, pour couvrir photo/texte.
+    """
     try:
         await query.edit_message_caption(caption=new_text)
     except Exception:
@@ -336,22 +354,22 @@ async def safe_edit(query, new_text: str):
 
 
 def main():
+    # build l'application Telegram
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # tout message envoyé au bot
+    # tout message envoyé au bot (texte, photo, vidéo, album)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
 
-    # clic sur ✅ / ❌
+    # clic sur ✅ / ❌ dans le groupe admin
     app.add_handler(CallbackQueryHandler(on_button_click))
 
+    # lance le polling Telegram (le bot écoute)
+    # poll_interval=2.0 = on interroge Telegram toutes les 2s pour limiter les conflits
+    print("🚀 Bot démarré, en écoute…")
     app.run_polling(poll_interval=2.0)
-
-import time
-while True:
-    time.sleep(60)
 
 
 if __name__ == "__main__":
     main()
-
-
+    # pas de while True ici
+    # run_polling() bloque déjà le process tant que le bot tourne
