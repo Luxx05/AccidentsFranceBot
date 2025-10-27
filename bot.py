@@ -406,18 +406,27 @@ def keep_alive():
 
 # ================== MAIN ==================
 
-def main():
-    # démarrer le keep alive dans un thread
+# verrou global anti double démarrage
+BOT_ALREADY_RUNNING = False
+
+def start_bot_once():
+    global BOT_ALREADY_RUNNING
+    if BOT_ALREADY_RUNNING:
+        print("⚠️ Bot déjà lancé, on skip pour éviter le conflit Telegram.")
+        return
+    BOT_ALREADY_RUNNING = True
+
+    # thread keep_alive (ping Render)
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # construire l'app Telegram
+    # build Telegram app
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # handlers
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
     app.add_handler(CallbackQueryHandler(on_button_click))
 
-    # lancer worker_loop + cleaner_loop DANS la boucle du bot
+    # lancer worker_loop + cleaner_loop dans la même event loop que Telegram
     async def post_init(application: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(worker_loop(application))
         asyncio.create_task(cleaner_loop())
@@ -432,5 +441,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    start_bot_once()
+
 
