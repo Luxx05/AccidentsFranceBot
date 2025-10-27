@@ -252,145 +252,70 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     user = msg.from_user
 
-    # anti-spam (mais on laisse passer les albums)
-    if _anti_spam(user.id, msg.media_group_id):
+    # 1️⃣ Ignorer les messages venant du groupe public (ils restent visibles, pas modérés)
+    if msg.chat.id == PUBLIC_GROUP_ID:
+        return
+
+    # 2️⃣ Anti-flood / anti-spam : évite l’envoi de plusieurs médias d’un coup
+    if anti_spam(user.id, msg.media_group_id):
         try:
-            await msg.reply_text("⏳ Calme un peu, envoie pas tout d'un coup 🙏")
-        except Exception:
+            await msg.reply_text("⚠️ Calme un peu, envoie pas tout d’un coup 🙏")
+        except:
             pass
         return
 
+    # 3️⃣ Récupérer le texte du message
     piece_text = (msg.caption or msg.text or "").strip()
+
+    # 4️⃣ Créer un identifiant utilisateur (optionnel, sinon reste anonyme)
     user_name = f"@{user.username}" if user.username else "anonyme"
 
-    # média ?
-    if msg.video:
-        media_type = "video"
-        file_id = msg.video.file_id
-    elif msg.photo:
-        media_type = "photo"
-        file_id = msg.photo[-1].file_id
-    else:
-        media_type = "text"
-        file_id = None
+    # 5️⃣ Construire le texte envoyé au groupe admin
+    text_admin = (
+        f"📩 **Nouveau signalement**\n"
+        f"👤 {user_name}\n"
+        f"{piece_text}"
+    )
 
-    media_group_id = msg.media_group_id  # None si pas album
-
-    # PAS ALBUM
-    if media_group_id is None:
-        report_id = f"{msg.chat_id}_{msg.id}"
-
-        PENDING[report_id] = {
-            "files": [],
-            "text": piece_text,
-            "user_name": user_name,
-            "ts": _now(),
-        }
-
-        if media_type in ["photo", "video"]:
-            PENDING[report_id]["files"].append({
-                "type": media_type,
-                "file_id": file_id,
-            })
-
-        # push job pour admin
-        await QUEUE.put(report_id)
-
-        try:
-            await msg.reply_text("✅ Reçu. Vérif avant publication.")
-        except Exception:
-            pass
-        return
-
-    # ALBUM
-    album = TEMP_ALBUMS.get(media_group_id)
-    if album is None:
-        TEMP_ALBUMS[media_group_id] = {
-            "files": [],
-            "text": piece_text,
-            "user_name": user_name,
-            "ts": _now(),
-            "chat_id": msg.chat_id,
-            "done": False,
-        }
-        album = TEMP_ALBUMS[media_group_id]
-
-    if media_type in ["photo", "video"]:
-        album["files"].append({
-            "type": media_type,
-            "file_id": file_id,
-        })
-
-    if piece_text and not album["text"]:
-        album["text"] = piece_text
-
-    album["ts"] = _now()
-
-    asyncio.create_task(finalize_album_later(media_group_id, context, msg))
-
-
-async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
-    await asyncio.sleep(0.5)
-
-    album = TEMP_ALBUMS.get(media_group_id)
-    if album is None:
-        return
-    if album.get("done"):
-        return
-
-    album["done"] = True
-
-    report_id = f"{album['chat_id']}_{media_group_id}"
-
-    PENDING[report_id] = {
-        "files": album["files"],
-        "text": album["text"],
-        "user_name": album["user_name"],
-        "ts": _now(),
-    }
-
-    # push job pour admin
-    await QUEUE.put(report_id)
-
+    # 6️⃣ Envoyer le message dans le groupe admin avec boutons
     try:
-        await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
-    except Exception:
+        if msg.photo:
+            await context.bot.send_photo(
+                chat_id=ADMIN_GROUP_ID,
+                photo=msg.photo[-1].file_id,
+                caption=text_admin,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Publier", callback_data="approve")],
+                    [InlineKeyboardButton("❌ Supprimer", callback_data="reject")]
+                ]),
+            )
+        elif msg.video:
+            await context.bot.send_video(
+                chat_id=ADMIN_GROUP_ID,
+                video=msg.video.file_id,
+                caption=text_admin,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Publier", callback_data="approve")],
+                    [InlineKeyboardButton("❌ Supprimer", callback_data="reject")]
+                ]),
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=ADMIN_GROUP_ID,
+                text=text_admin,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Publier", callback_data="approve")],
+                    [InlineKeyboardButton("❌ Supprimer", callback_data="reject")]
+                ]),
+            )
+    except Exception as e:
+        print(f"Erreur envoi admin : {e}")
+
+    # 7️⃣ Confirmer à l’utilisateur que c’est reçu
+    try:
+        await msg.reply_text("✅ Reçu. Vérif avant publication.")
+    except:
         pass
-
-    TEMP_ALBUMS.pop(media_group_id, None)
-
-
-async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    action, report_id = data.split("|", 1)
-
-    info = PENDING.get(report_id)
-    if not info:
-        await safe_edit(query, "⛔ Déjà traité / introuvable.")
-        return
-
-    if action == "REJECT":
-        await safe_edit(query, "❌ Supprimé. Non publié.")
-        PENDING.pop(report_id, None)
-        return
-
-    if action == "APPROVE":
-        await _publish_public(context, info)
-        await safe_edit(query, "✅ Publié.")
-        PENDING.pop(report_id, None)
-
-
-async def safe_edit(query, new_text: str):
-    try:
-        await query.edit_message_caption(caption=new_text)
-    except Exception:
-        try:
-            await query.edit_message_text(text=new_text)
-        except Exception:
-            pass
 
 
 # ================== KEEP ALIVE ==================
@@ -459,6 +384,7 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 if __name__ == "__main__":
     start_bot_once()
+
 
 
 
