@@ -87,5 +87,5 @@
 
 <p align="center">
   <i>Project built to centralize accident, radar and dashcam reports across France.</i><br>
-  <b>Created by Laurentiu Stoian 🇫🇷</b>
+  <b>Created by L.S 🇫🇷</b>
 </p>
