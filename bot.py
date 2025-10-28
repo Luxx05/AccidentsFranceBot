@@ -470,6 +470,9 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption_for_public = text if text else None
 
         # ---------- 1. choisir le topic où poster dans le groupe PUBLIC ----------
+        PUBLIC_TOPIC_VIDEOS_ID = 224   # 🎥 Vidéos & Dashcams
+        PUBLIC_TOPIC_RADARS_ID = 222   # 📍 Radars & Signalements
+
         text_lower = text.lower() if text else ""
 
         accident_keywords = [
@@ -729,4 +732,5 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
 
