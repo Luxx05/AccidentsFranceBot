@@ -411,68 +411,124 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # si approbation
-    if action == "APPROVE":
+        
+        if action == "APPROVE":
         files = info["files"]
         text = (info["text"] or "").strip()
         caption_for_public = text if text else None
 
-        # Cas sans média → message texte simple dans PUBLIC
+        # --- 1. choisir le topic où poster dans le groupe PUBLIC ---
+        text_lower = text.lower()
+
+        PUBLIC_TOPIC_VIDEOS_ID = 224  # 🎥 Vidéos & Dashcams
+        PUBLIC_TOPIC_RADARS_ID = 222  # 📍 Radars & Signalements
+
+        if any(keyword in text_lower for keyword in ["radar", "contrôle", "controle", "contrôle", "voiture banalisée", "banalisée", "voiture radar", "flash", "laser", "laser mobile", "danger"]):
+            target_thread_id = PUBLIC_TOPIC_RADARS_ID
+        else:
+            target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
+
+        # --- 2. cas : juste du texte ---
         if not files:
             if text:
                 await context.bot.send_message(
                     chat_id=PUBLIC_GROUP_ID,
-                    text=text
+                    text=text,
+                    message_thread_id=target_thread_id
                 )
                 await safe_edit(query, "✅ Publié (texte).")
             else:
                 await safe_edit(query, "❌ Rien à publier (vide).")
-            PENDING.pop(rid, None)
+            PENDING.pop(report_id, None)
             return
 
-        # Cas 1 média
+        # --- 3. cas : un seul média (photo OU vidéo) ---
         if len(files) == 1:
             m = files[0]
             if m["type"] == "photo":
                 await context.bot.send_photo(
                     chat_id=PUBLIC_GROUP_ID,
                     photo=m["file_id"],
-                    caption=caption_for_public
+                    caption=caption_for_public,
+                    message_thread_id=target_thread_id
                 )
             else:
                 await context.bot.send_video(
                     chat_id=PUBLIC_GROUP_ID,
                     video=m["file_id"],
-                    caption=caption_for_public
+                    caption=caption_for_public,
+                    message_thread_id=target_thread_id
                 )
-            await safe_edit(query, "✅ Publié.")
-            PENDING.pop(rid, None)
+
+            await safe_edit(query, "✅ Publié dans le groupe public (classé).")
+            PENDING.pop(report_id, None)
             return
 
-        # Cas plusieurs médias → album
+        # --- 4. cas : plusieurs médias (album) ---
         media_group = []
         for i, m in enumerate(files):
-            cap = caption_for_public if i == 0 else None
             if m["type"] == "photo":
-                media_group.append(InputMediaPhoto(media=m["file_id"], caption=cap))
+                media_group.append(
+                    InputMediaPhoto(
+                        media=m["file_id"],
+                        caption=caption_for_public if i == 0 else None
+                    )
+                )
             else:
-                media_group.append(InputMediaVideo(media=m["file_id"], caption=cap))
+                media_group.append(
+                    InputMediaVideo(
+                        media=m["file_id"],
+                        caption=caption_for_public if i == 0 else None
+                    )
+                )
 
-        await context.bot.send_media_group(
-            chat_id=PUBLIC_GROUP_ID,
-            media=media_group
-        )
-        await safe_edit(query, "✅ Publié (album).")
-        PENDING.pop(rid, None)
+        # ⚠️ send_media_group gère pas message_thread_id dans toutes les versions de la lib.
+        # donc on fait 2 étapes:
+        # 1. on envoie le 1er média nous-mêmes dans le bon topic
+        # 2. on envoie le reste en réponse dans ce même topic
+
+        first = media_group[0]
+        rest = media_group[1:]
+
+        # envoyer le premier média manuellement
+        if isinstance(first, InputMediaPhoto):
+            sent_msg = await context.bot.send_photo(
+                chat_id=PUBLIC_GROUP_ID,
+                photo=first.media,
+                caption=first.caption,
+                message_thread_id=target_thread_id
+            )
+        else:
+            sent_msg = await context.bot.send_video(
+                chat_id=PUBLIC_GROUP_ID,
+                video=first.media,
+                caption=first.caption,
+                message_thread_id=target_thread_id
+            )
+
+        # envoyer le reste en réponse dans le même thread
+        for extra in rest:
+            if isinstance(extra, InputMediaPhoto):
+                await context.bot.send_photo(
+                    chat_id=PUBLIC_GROUP_ID,
+                    photo=extra.media,
+                    caption=None,
+                    message_thread_id=target_thread_id,
+                    reply_to_message_id=sent_msg.message_id
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=PUBLIC_GROUP_ID,
+                    video=extra.media,
+                    caption=None,
+                    message_thread_id=target_thread_id,
+                    reply_to_message_id=sent_msg.message_id
+                )
+
+        await safe_edit(query, "✅ Publié dans le groupe public (album trié).")
+        PENDING.pop(report_id, None)
         return
 
-
-async def safe_edit(query, new_text: str):
-    """Essaye d'éditer le message admin (boutons) avec le statut final."""
-    try:
-        await query.edit_message_text(text=new_text)
-    except Exception:
-        # si c'était une légende ou autre → on ignore s'il veut pas
-        pass
 
 
 # =========================================================
@@ -603,6 +659,7 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
 
 
 
