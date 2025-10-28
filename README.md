@@ -86,6 +86,7 @@
 ---
 
 <p align="center">
-  <i>Projet développé pour centraliser les signalements d'accidents, radars et dashcams en France.</i><br>
+  <i>Projet développé pour centraliser les signalements d'accidents, radars et dashcams en France.
+  🔧 Bot flexible et réutilisable pour d’autres communautés ou projets.</i><br>
   <b>Créé par L.S 🇫🇷</b>
 </p>
