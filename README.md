@@ -1,65 +1,68 @@
-![Bannière](https://github.com/Luxx05/AccidentsFranceBot/raw/main/assets/banner.png)
+# 🚨 Accidents France Bot
 
-
-<h1 align="center">🚨 Accidents France Bot</h1>
-<p align="center">
-  <b>Bot Telegram automatisé pour la communauté Accidents France.</b><br>
-  Envoi anonyme, modération, et publication automatique des signalements routiers.
-</p>
-
-<p align="center">
-  <a href="https://render.com">
-    <img src="https://img.shields.io/badge/Render-Online-brightgreen?style=flat-square&logo=render&logoColor=white" alt="Render Status"/>
-  </a>
-  <a href="https://t.me/AccidentsFR">
-    <img src="https://img.shields.io/badge/Telegram-Community-blue?style=flat-square&logo=telegram" alt="Telegram"/>
-  </a>
-  <a href="https://github.com/Luxx05/AccidentsFranceBot">
-    <img src="https://img.shields.io/github/license/Luxx05/AccidentsFranceBot?style=flat-square" alt="License"/>
-  </a>
-</p>
+Bot Telegram automatisé pour la communauté **Accidents France 🇫🇷**  
+📸 Signalements d’accidents, dashcams et radars en temps réel.  
+Le bot gère la **modération, anonymisation et publication automatique** dans le groupe public.
 
 ---
 
-## 🔧 Fonctionnalités principales
+## ⚙️ Fonctionnalités principales
 
-- 📸 Envoi **anonyme** de vidéos, photos et signalements d'accidents  
-- 🧩 **Validation manuelle** par les administrateurs avant publication  
-- 🚀 **Publication automatique** dans le groupe public  
-- 🧱 **Anti-flood** et protection contre le spam  
-- ☁️ Hébergement sur **Render** avec système de **keep-alive**
-
----
-
-## 📡 Structure du projet
-
-| Fichier | Description |
-|----------|-------------|
-| `bot.py` | Script principal du bot |
-| `requirements.txt` | Dépendances Python |
-| `Dockerfile` | Configuration Render |
-| `README.md` | Documentation du projet |
-| `assets/banner.png` | Bannière GitHub |
+- ✅ **Envoi anonyme** : les utilisateurs peuvent signaler un accident ou radar sans révéler leur identité.  
+- 🧠 **Tri intelligent** :  
+  - Les messages contenant “radar”, “contrôle”, etc. sont envoyés dans le topic **📍 Radars & Signalements**.  
+  - Les vidéos ou textes contenant “accident”, “dashcam”, etc. vont dans **🎥 Vidéos & Dashcams**.  
+- 🛡️ **Vérification avant publication** : tout passe par le groupe admin pour modération.  
+- 📤 **Publication automatique** dans le groupe public une fois approuvé.  
+- 🧹 **Anti-spam & nettoyage mémoire** intégré.  
+- 🔄 **Compatible Render / Keep-Alive** (Flask + thread pour éviter l’endormissement).  
 
 ---
 
-## ⚙️ Variables d'environnement
+## 🧩 Structure du projet
 
-| Variable | Description |
-|-----------|--------------|
-| `BOT_TOKEN` | Token du bot Telegram (@BotFather) |
-| `KEEP_ALIVE_URL` | URL Render pour le ping automatique |
+/app
+├── bot.py # Code principal du bot
+├── requirements.txt # Dépendances Python
+├── Procfile # Lancement Render
+└── assets/ # (optionnel) bannières, visuels, logo
 
----
-
-## 💬 Liens utiles
-
-- 🛰️ **Canal principal :** [@Accidents_France](https://t.me/Accidents_France)  
-- 👥 **Groupe public :** [t.me/AccidentsFR](https://t.me/AccidentsFR)  
-- 🤖 **Bot :** [@AccidentsFranceBot](https://t.me/AccidentsFranceBot)
+yaml
+Copier le code
 
 ---
 
-<p align="center">
-  <i>Projet développé pour centraliser les signalements d'accidents et radars.</i>
-</p>
+## 🚀 Déploiement
+
+1. Crée une app **Render** (Free Web Service).
+2. Ajoute les variables d’environnement :
+BOT_TOKEN=<ton_token_bot>
+ADMIN_GROUP_ID=<ID_du_groupe_admin>
+PUBLIC_GROUP_ID=<ID_du_groupe_public>
+KEEP_ALIVE_URL=<URL_de_ton_service_Render>
+
+yaml
+Copier le code
+3. Connecte ton repo GitHub et déploie automatiquement.  
+4. Le bot ping périodiquement ton URL pour rester actif.
+
+---
+
+## 🔗 Liens officiels
+
+- Groupe public → [@AccidentsFR](https://t.me/AccidentsFR)  
+- Bot de signalement → [@AccidentsFranceBot](https://t.me/AccidentsFranceBot)  
+- Canal Telegram → [Accidents France 🚨](https://t.me/accidents_france)
+
+---
+
+## 💡 À venir
+
+- 📩 Notification automatique à l’utilisateur quand son signalement est approuvé.  
+- 🧠 Analyse plus fine des textes pour un tri encore plus précis.  
+- 📊 Statistiques automatiques hebdomadaires des signalements.
+
+---
+
+**Créé et maintenu par : [Laurentiu Stoian](https://github.com/)**  
+🔥 Open Source — projet communautaire, améliorable par tous.
