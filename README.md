@@ -1,9 +1,13 @@
+<p align="center">
+  🇫🇷 <b>Français</b> │ 🇬🇧 <a href="./README_EN.md">English</a>
+</p>
+
 ![Bannière](https://github.com/Luxx05/AccidentsFranceBot/raw/main/assets/banner.png)
 
 <h1 align="center">🚨 Accidents France Bot</h1>
 <p align="center">
   <b>Bot Telegram automatisé pour la communauté Accidents France.</b><br>
-  Envoi anonyme, modération, tri automatique par type de signalement (radar / accident) et publication instantanée.
+  Envoi anonyme, modération, tri automatique (radars / accidents) et publication instantanée.
 </p>
 
 <p align="center">
@@ -11,7 +15,7 @@
     <img src="https://img.shields.io/badge/Render-Online-brightgreen?style=flat-square&logo=render&logoColor=white" alt="Render Status"/>
   </a>
   <a href="https://t.me/AccidentsFR">
-    <img src="https://img.shields.io/badge/Telegram-Community-blue?style=flat-square&logo=telegram" alt="Telegram"/>
+    <img src="https://img.shields.io/badge/Telegram-Communauté-blue?style=flat-square&logo=telegram" alt="Telegram"/>
   </a>
   <a href="https://github.com/Luxx05/AccidentsFranceBot">
     <img src="https://img.shields.io/github/license/Luxx05/AccidentsFranceBot?style=flat-square" alt="License"/>
@@ -22,14 +26,14 @@
 
 ## 🔧 Fonctionnalités principales
 
-- 📸 Envoi **anonyme** de vidéos, photos et signalements d'accidents ou radars  
-- 🧠 **Tri intelligent automatique** vers le bon topic :  
+- 📸 Envoi **anonyme** de vidéos, photos et signalements d'accidents  
+- 🧠 **Tri intelligent** vers le bon topic :  
   - 🎥 `Vidéos & Dashcams`  
   - 📍 `Radars & Signalements`  
 - 🧩 **Validation manuelle** par les administrateurs avant publication  
-- 🚀 **Publication automatique** dans le groupe public après approbation  
-- 🧱 **Anti-spam & anti-flood** intégré pour éviter les abus  
-- ☁️ Hébergement **Render** avec système de **keep-alive** automatique  
+- 🚀 **Publication automatique** dans le groupe public  
+- 🧱 **Anti-flood** et protection contre le spam intégrés  
+- ☁️ Hébergement sur **Render** avec système de **keep-alive**
 
 ---
 
@@ -37,9 +41,9 @@
 
 | Fichier | Description |
 |----------|-------------|
-| `bot.py` | Code principal du bot |
+| `bot.py` | Script principal du bot |
 | `requirements.txt` | Dépendances Python |
-| `Procfile` | Démarrage Render |
+| `Procfile` | Configuration Render |
 | `README.md` | Documentation du projet |
 | `assets/banner.png` | Bannière GitHub |
 
@@ -50,18 +54,18 @@
 | Variable | Description |
 |-----------|--------------|
 | `BOT_TOKEN` | Token du bot Telegram (@BotFather) |
-| `ADMIN_GROUP_ID` | ID du groupe admin (modération) |
-| `PUBLIC_GROUP_ID` | ID du groupe public (publication) |
-| `KEEP_ALIVE_URL` | URL Render utilisée pour le ping automatique |
+| `ADMIN_GROUP_ID` | ID du groupe privé de modération |
+| `PUBLIC_GROUP_ID` | ID du groupe public |
+| `KEEP_ALIVE_URL` | URL Render pour le ping automatique |
 
 ---
 
 ## 🚀 Déploiement
 
-1. Crée une app **Render Web Service (Free)**  
+1. Crée un **Render Web Service (Free)**  
 2. Connecte ton **repo GitHub**  
-3. Ajoute les variables d’environnement listées ci-dessus  
-4. Le bot ping automatiquement ton service toutes les 10 minutes pour rester actif  
+3. Ajoute les variables d'environnement listées ci-dessus  
+4. Le bot s’auto-ping toutes les 10 minutes pour rester actif  
 
 ---
 
@@ -75,13 +79,13 @@
 
 ## 🧠 À venir
 
-- 📩 Notification automatique à l’utilisateur quand son signalement est publié  
+- 📩 Notification automatique à l’auteur après publication  
 - 📊 Statistiques hebdomadaires sur les signalements  
-- 🛰️ Système de géolocalisation simplifié pour les radars et accidents  
+- 🛰️ Géolocalisation simplifiée des radars et accidents  
 
 ---
 
 <p align="center">
-  <i>Projet développé pour centraliser les signalements d'accidents, radars et vidéos dashcam en France.</i><br>
-  <b>Créé par L.S 🇫🇷</b>
+  <i>Projet développé pour centraliser les signalements d'accidents, radars et dashcams en France.</i><br>
+  <b>Créé par Laurentiu Stoian 🇫🇷</b>
 </p>
