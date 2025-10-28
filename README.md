@@ -87,5 +87,5 @@
 
 <p align="center">
   <i>Projet développé pour centraliser les signalements d'accidents, radars et dashcams en France.</i><br>
-  <b>Créé par Laurentiu Stoian 🇫🇷</b>
+  <b>Créé par L.S 🇫🇷</b>
 </p>
