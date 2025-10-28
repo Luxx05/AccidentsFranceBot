@@ -472,17 +472,42 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ---------- 1. choisir le topic où poster dans le groupe PUBLIC ----------
         text_lower = text.lower() if text else ""
 
-        # mets bien les bons IDs de topics ici :
-        PUBLIC_TOPIC_VIDEOS_ID = 224   # 🎥 Vidéos & Dashcams
-        PUBLIC_TOPIC_RADARS_ID = 222   # 📍 Radars & Signalements
+        accident_keywords = [
+    "accident", "accrochage", "carambolage", "choc", "collision",
+    "crash", "sortie de route", "perte de contrôle", "perdu le contrôle",
+    "sorti de la route", "accidenté", "accident grave", "accident mortel",
+    "accident léger", "accident autoroute", "accident route", "accident nationale",
+    "accident voiture", "accident moto", "accident camion", "accident poids lourd",
+    "voiture accidentée", "camion couché", "camion renversé", "choc frontal",
+    "tête à queue", "dashcam", "dash cam", "dash-cam", "caméra embarquée",
+    "vidéo accident", "impact", "sorti de la chaussée", "frotter", "accrochage léger",
+    "freinage d'urgence", "a percuté", "percuté", "collision arrière",
+    "route coupée", "bouchon accident", "accident en direct"
+]
 
-        # mots-clés radar ⇒ on envoie dans le topic Radars
-        radar_keywords = ["radar", "contrôle", "controle", "laser", "mobile", "flash", "police"]
 
-        if any(keyword in text_lower for keyword in radar_keywords):
-            target_thread_id = PUBLIC_TOPIC_RADARS_ID
+        radar_keywords = [
+    "radar", "radar mobile", "radar fixe", "radar flash", "radar de chantier",
+    "radar tourelle", "radar embarqué", "radar double sens", "radar chantier",
+    "contrôle", "controle", "contrôle routier", "contrôle radar", "contrôle police",
+    "contrôle gendarmerie", "contrôle laser", "contrôle mobile",
+    "flash", "flashé", "flasher", "laser", "jumelle", "jumelles",
+    "police", "gendarmerie", "camion radar", "voiture radar", "banalisée",
+    "voiture banalisée", "voiture de police", "véhicule radar", "véhicule banalisé",
+    "camion banalisé", "radar caché", "radar planqué", "piège", "contrôle alcootest",
+    "alcoolémie", "radar mobile nouvelle génération", "radar en travaux"
+]
+
+
+        # priorité ACCIDENT / DASHCAM
+        if any(word in text_lower for word in accident_keywords):
+            target_thread_id = PUBLIC_TOPIC_VIDEOS_ID      # 🎥 Vidéos & Dashcams
+        elif any(word in text_lower for word in radar_keywords):
+            target_thread_id = PUBLIC_TOPIC_RADARS_ID      # 📍 Radars & Signalements
         else:
+            # fallback si aucun mot clef
             target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
+
 
         # ---------- 2. Publication selon le cas ----------
 
@@ -704,3 +729,4 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
