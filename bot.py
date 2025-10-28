@@ -442,58 +442,51 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, report_id = data.split("|", 1)
 
     info = PENDING.get(report_id)
+
+    # Si on ne retrouve pas l'info (déjà traitée / nettoyée), on enlève visuellement les boutons quand même
     if not info:
-        # plus trouvé -> on retire quand même les boutons visuellement
         try:
-            await query.edit_message_text("⛔ Déjà traité / introuvable.")
+            await query.edit_message_text("🚫 Déjà traité / introuvable.")
         except Exception:
             pass
         return
 
-    # si rejet
+    # --- CAS REJET ---
     if action == "REJECT":
-        # on supprime des en attente
-        PENDING.pop(report_id, None)
-
-        # on remplace le message admin (enlève les boutons)
+        # on retire visuellement les boutons
         try:
-            await query.edit_message_text("❌ Signalement supprimé, non publié.")
+            await query.edit_message_text("❌ Supprimé, non publié.")
         except Exception:
-            # si c'était une légende de media_group, fallback = delete
-            try:
-                await context.bot.delete_message(
-                    chat_id=query.message.chat_id,
-                    message_id=query.message.message_id
-                )
-            except Exception:
-                pass
+            pass
+
+        # on oublie ce report
+        PENDING.pop(report_id, None)
         return
 
-    # si approbation
+    # --- CAS APPROUVE ---
     if action == "APPROVE":
         files = info["files"]
         text = (info["text"] or "").strip()
         caption_for_public = text if text else None
 
-        # --- routing topic ---
-        text_lower = text.lower()
+        # ---------- 1. choisir le topic où poster dans le groupe PUBLIC ----------
+        text_lower = text.lower() if text else ""
 
-        PUBLIC_TOPIC_VIDEOS_ID = 224    # 🎥 Vidéos & Dashcams
-        PUBLIC_TOPIC_RADARS_ID = 222    # 📍 Radars & Signalements
+        # mets bien les bons IDs de topics ici :
+        PUBLIC_TOPIC_VIDEOS_ID = 224   # 🎥 Vidéos & Dashcams
+        PUBLIC_TOPIC_RADARS_ID = 222   # 📍 Radars & Signalements
 
-        if any(keyword in text_lower for keyword in [
-            "radar", "radar mobile", "radar fixe", "radar flash",
-            "contrôle", "controle", "voiture banalisée",
-            "voiture radar", "contrôle police", "contrôle routier",
-            "laser", "danger"
-        ]):
+        # mots-clés radar ⇒ on envoie dans le topic Radars
+        radar_keywords = ["radar", "contrôle", "controle", "laser", "mobile", "flash", "police"]
+
+        if any(keyword in text_lower for keyword in radar_keywords):
             target_thread_id = PUBLIC_TOPIC_RADARS_ID
-            posted_where = "📍 Radars & Signalements"
         else:
             target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
-            posted_where = "🎥 Vidéos & Dashcams"
 
-        # === CAS 1 : juste du texte ===
+        # ---------- 2. Publication selon le cas ----------
+
+        # a) juste du texte, pas de média
         if not files:
             if text:
                 await context.bot.send_message(
@@ -501,29 +494,24 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=text,
                     message_thread_id=target_thread_id
                 )
-                confirm_text = f"✅ Publié ({posted_where})."
-            else:
-                confirm_text = "❌ Rien à publier (vide)."
 
-            # nettoyage + feedback
-            PENDING.pop(report_id, None)
-            try:
-                await query.edit_message_text(confirm_text)
-            except Exception:
+                # on retire les boutons dans l'admin
                 try:
-                    await context.bot.delete_message(
-                        chat_id=query.message.chat_id,
-                        message_id=query.message.message_id
-                    )
-                    await context.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text=confirm_text
-                    )
+                    await query.edit_message_text("✅ Publié (texte).")
                 except Exception:
                     pass
+
+            else:
+                # rien à publier
+                try:
+                    await query.edit_message_text("❌ Rien à publier (vide).")
+                except Exception:
+                    pass
+
+            PENDING.pop(report_id, None)
             return
 
-        # === CAS 2 : un seul média ===
+        # b) 1 seul média
         if len(files) == 1:
             m = files[0]
             if m["type"] == "photo":
@@ -541,34 +529,23 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_thread_id=target_thread_id
                 )
 
-            confirm_text = f"✅ Publié ({posted_where})."
-            PENDING.pop(report_id, None)
-
+            # feedback admin
             try:
-                await query.edit_message_text(confirm_text)
+                await query.edit_message_text("✅ Publié dans le groupe public.")
             except Exception:
-                try:
-                    await context.bot.delete_message(
-                        chat_id=query.message.chat_id,
-                        message_id=query.message.message_id
-                    )
-                    await context.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text=confirm_text
-                    )
-                except Exception:
-                    pass
+                pass
+
+            PENDING.pop(report_id, None)
             return
 
-        # === CAS 3 : plusieurs médias (album) ===
-        # 👉 ici on regroupe en 1 SEUL post dans le public, avec texte sur le premier média
+        # c) ALBUM (plusieurs médias)
         media_group = []
         for i, m in enumerate(files):
             if m["type"] == "photo":
                 media_group.append(
                     InputMediaPhoto(
                         media=m["file_id"],
-                        caption=caption_for_public if i == 0 else None
+                        caption=caption_for_public if i == 0 else None  # légende seulement sur la première
                     )
                 )
             else:
@@ -579,39 +556,22 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 )
 
-        # important : envoyer l'album DANS le topic (= message_thread_id)
-        # contrairement à send_media_group normal, python-telegram-bot permet pas
-        # message_thread_id directement dans send_media_group sur les vieilles versions.
-        # donc on fait un fallback manuel ci-dessous 👇 (voir point 2)
+        # 👉 IMPORTANT : on envoie l'ALBUM EN UNE FOIS dans le topic choisi
+        await context.bot.send_media_group(
+            chat_id=PUBLIC_GROUP_ID,
+            media=media_group,
+            message_thread_id=target_thread_id
+        )
+
+        # feedback admin
         try:
-            await send_album_in_topic(
-                context,
-                chat_id=PUBLIC_GROUP_ID,
-                thread_id=target_thread_id,
-                media_group=media_group
-            )
-            confirm_text = f"✅ Publié (album) ({posted_where})."
-        except Exception as e:
-            confirm_text = f"⚠️ Album publié partiellement ({posted_where})."
+            await query.edit_message_text("✅ Publié (album) dans le groupe public.")
+        except Exception:
+            pass
 
         PENDING.pop(report_id, None)
-
-        # nettoyer le message admin + feedback lisible
-        try:
-            await query.edit_message_text(confirm_text)
-        except Exception:
-            try:
-                await context.bot.delete_message(
-                    chat_id=query.message.chat_id,
-                    message_id=query.message.message_id
-                )
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=confirm_text
-                )
-            except Exception:
-                pass
         return
+
 
 
 
@@ -744,6 +704,7 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
 
 
 
