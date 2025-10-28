@@ -1,10 +1,9 @@
 ![Bannière](https://github.com/Luxx05/AccidentsFranceBot/raw/main/assets/banner.png)
 
-
 <h1 align="center">🚨 Accidents France Bot</h1>
 <p align="center">
   <b>Bot Telegram automatisé pour la communauté Accidents France.</b><br>
-  Envoi anonyme, modération, et publication automatique des signalements routiers.
+  Envoi anonyme, modération, tri automatique par type de signalement (radar / accident) et publication instantanée.
 </p>
 
 <p align="center">
@@ -23,11 +22,14 @@
 
 ## 🔧 Fonctionnalités principales
 
-- 📸 Envoi **anonyme** de vidéos, photos et signalements d'accidents  
+- 📸 Envoi **anonyme** de vidéos, photos et signalements d'accidents ou radars  
+- 🧠 **Tri intelligent automatique** vers le bon topic :  
+  - 🎥 `Vidéos & Dashcams`  
+  - 📍 `Radars & Signalements`  
 - 🧩 **Validation manuelle** par les administrateurs avant publication  
-- 🚀 **Publication automatique** dans le groupe public  
-- 🧱 **Anti-flood** et protection contre le spam  
-- ☁️ Hébergement sur **Render** avec système de **keep-alive**
+- 🚀 **Publication automatique** dans le groupe public après approbation  
+- 🧱 **Anti-spam & anti-flood** intégré pour éviter les abus  
+- ☁️ Hébergement **Render** avec système de **keep-alive** automatique  
 
 ---
 
@@ -35,9 +37,9 @@
 
 | Fichier | Description |
 |----------|-------------|
-| `bot.py` | Script principal du bot |
+| `bot.py` | Code principal du bot |
 | `requirements.txt` | Dépendances Python |
-| `Dockerfile` | Configuration Render |
+| `Procfile` | Démarrage Render |
 | `README.md` | Documentation du projet |
 | `assets/banner.png` | Bannière GitHub |
 
@@ -48,7 +50,18 @@
 | Variable | Description |
 |-----------|--------------|
 | `BOT_TOKEN` | Token du bot Telegram (@BotFather) |
-| `KEEP_ALIVE_URL` | URL Render pour le ping automatique |
+| `ADMIN_GROUP_ID` | ID du groupe admin (modération) |
+| `PUBLIC_GROUP_ID` | ID du groupe public (publication) |
+| `KEEP_ALIVE_URL` | URL Render utilisée pour le ping automatique |
+
+---
+
+## 🚀 Déploiement
+
+1. Crée une app **Render Web Service (Free)**  
+2. Connecte ton **repo GitHub**  
+3. Ajoute les variables d’environnement listées ci-dessus  
+4. Le bot ping automatiquement ton service toutes les 10 minutes pour rester actif  
 
 ---
 
@@ -60,6 +73,15 @@
 
 ---
 
+## 🧠 À venir
+
+- 📩 Notification automatique à l’utilisateur quand son signalement est publié  
+- 📊 Statistiques hebdomadaires sur les signalements  
+- 🛰️ Système de géolocalisation simplifié pour les radars et accidents  
+
+---
+
 <p align="center">
-  <i>Projet développé pour centraliser les signalements d'accidents et radars.</i>
+  <i>Projet développé pour centraliser les signalements d'accidents, radars et vidéos dashcam en France.</i><br>
+  <b>Créé par Laurentiu Stoian 🇫🇷</b>
 </p>
