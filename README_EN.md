@@ -87,5 +87,6 @@
 
 <p align="center">
   <i>Project built to centralize accident, radar and dashcam reports across France.</i><br>
+  <i>🔧 Flexible bot, reusable for other communities or projects.</i><br>
   <b>Created by L.S 🇫🇷</b>
 </p>
