@@ -37,6 +37,9 @@ SPAM_COOLDOWN = 4
 MUTE_THRESHOLD = 3
 MUTE_DURATION_SEC = 300
 
+# NOUVEAU : Durée du mute (en secondes) pour les trolls
+MUTE_DURATION_SPAM_SUBMISSION = 3600 # 1 heure
+
 CLEAN_MAX_AGE_PENDING = 3600 * 24
 CLEAN_MAX_AGE_ALBUMS = 60
 CLEAN_MAX_AGE_SPAM = 3600
@@ -44,14 +47,10 @@ CLEAN_MAX_AGE_SPAM = 3600
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 30
 
-# --- Topics du groupe public ---
 PUBLIC_TOPIC_VIDEOS_ID = 224
 PUBLIC_TOPIC_RADARS_ID = 222
-# (Laissez PUBLIC_TOPIC_GENERAL_ID à 'None' si vous utilisez le topic "Général" par défaut)
 PUBLIC_TOPIC_GENERAL_ID = None 
 
-# --- Mots-clés pour le tri ---
-# (Déplacés ici pour être utilisés par /deplacer ET on_button_click)
 accident_keywords = [
     "accident", "accrochage", "carambolage", "choc", "collision",
     "crash", "sortie de route", "perte de contrôle", "perdu le contrôle",
@@ -110,6 +109,13 @@ async def init_db():
                     report_id TEXT
                 )
             """)
+            # NOUVEAU : Table pour les utilisateurs mutés (des soumissions privées)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS muted_users (
+                    user_id INTEGER PRIMARY KEY,
+                    mute_until_ts INTEGER
+                )
+            """)
             await db.commit()
         print(f"🗃️ Base de données prête sur '{DB_NAME}'.")
     except Exception as e:
@@ -140,6 +146,7 @@ def _make_admin_preview(user_name: str, text: str | None, is_album: bool) -> str
     body = f"\n\n{text}" if text else ""
     return head + who + body
 
+# MODIFIÉ : Ajout du bouton "Rejeter & Muter"
 def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -147,7 +154,8 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✏️ Modifier", callback_data=f"EDIT|{report_id}")
         ],
         [
-            InlineKeyboardButton("❌ Supprimer", callback_data=f"REJECT|{report_id}")
+            InlineKeyboardButton("❌ Supprimer", callback_data=f"REJECT|{report_id}"),
+            InlineKeyboardButton("🔇 Rejeter & Muter 1h", callback_data=f"REJECTMUTE|{report_id}")
         ]
     ])
 
@@ -160,7 +168,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not msg:
         return
 
-    # 1. NETTOYAGE DES MESSAGES DE SERVICE (join/left/photo)
+    # 1. NETTOYAGE DES MESSAGES DE SERVICE
     if (
         msg.new_chat_members or
         msg.left_chat_member or
@@ -171,10 +179,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if msg.chat_id == PUBLIC_GROUP_ID or msg.chat_id == ADMIN_GROUP_ID:
             try:
                 await msg.delete()
-                print(f"[CLEANER] Service message deleted in {msg.chat_id}")
                 return
-            except Exception as e:
-                print(f"[CLEANER] Failed to delete service message: {e}")
+            except Exception:
+                pass
         return
 
     # 2. GESTION DES MESSAGES NORMAUX
@@ -182,7 +189,34 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = msg.chat_id
     media_group_id = msg.media_group_id
     
-    # 3. ANTI-SPAM (GROUPE PUBLIC)
+    # 3. VÉRIFICATION MUTE (UNIQUEMENT EN PRIVÉ)
+    # Si le message vient d'un chat privé (chat_id == user.id)
+    if chat_id == user.id:
+        try:
+            async with aiosqlite.connect(DB_NAME) as db:
+                async with db.cursor() as cursor:
+                    await cursor.execute("SELECT mute_until_ts FROM muted_users WHERE user_id = ?", (user.id,))
+                    row = await cursor.fetchone()
+                
+                if row:
+                    mute_until_ts = row[0]
+                    now = int(_now())
+                    
+                    if now < mute_until_ts:
+                        # L'utilisateur est toujours muté
+                        remaining_min = (mute_until_ts - now) // 60 + 1
+                        await msg.reply_text(f"❌ Vous avez été restreint d'envoyer des signalements pour spam.\nTemps restant : {remaining_min} minutes.")
+                        return # On bloque le message
+                    else:
+                        # Le mute a expiré, on nettoie
+                        await db.execute("DELETE FROM muted_users WHERE user_id = ?", (user.id,))
+                        await db.commit()
+        except Exception as e:
+            print(f"[ERREUR CHECK MUTE] {e}")
+            # On laisse passer en cas d'erreur DB, sécurité
+    
+
+    # 4. ANTI-SPAM (GROUPE PUBLIC)
     if chat_id == PUBLIC_GROUP_ID:
         text_raw = (msg.text or msg.caption or "").strip()
         text = text_raw.lower()
@@ -227,11 +261,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
     # === fin anti-spam ===
 
-    # 4. IGNORER LES MESSAGES (non-commandes) DES GROUPES
+    # 5. IGNORER LES MESSAGES (non-commandes) DES GROUPES
     if chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID:
         return
 
-    # 5. TRAITEMENT DES MESSAGES PRIVÉS (SOUMISSIONS)
+    # 6. TRAITEMENT DES MESSAGES PRIVÉS (SOUMISSIONS)
     if _is_spam(user.id, media_group_id):
         try:
             await msg.reply_text("⏳ Doucement, envoie pas tout d'un coup 🙏")
@@ -422,72 +456,49 @@ async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
         print(f"[HANDLE ADMIN CANCEL] {e}")
 
 
-# NOUVELLE FONCTIONNALITÉ : Commande /deplacer
 async def handle_deplacer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    
-    # 1. NOUVELLE VÉRIFICATION D'ADMIN (gère l'anonymat)
     try:
         user_id = msg.from_user.id
         is_admin_check_passed = False
-
-        # 1a. Vérifier les ID système (admin anonyme ou publication en tant que canal)
-        # 1087968824 = 'Telegram' (Anonymous Admin)
-        # 136817688 = 'Group' (Publication au nom du groupe/canal)
         if user_id in [1087968824, 136817688]:
             is_admin_check_passed = True
-        
-        # 1b. Si ce n'est pas un ID système, vérifier si c'est un admin non-anonyme
         else:
             admins_list = await context.bot.get_chat_administrators(PUBLIC_GROUP_ID)
             admin_ids = {admin.user.id for admin in admins_list}
             if user_id in admin_ids:
                 is_admin_check_passed = True
-
         if not is_admin_check_passed:
             print(f"[DEPLACER] Ignoré (non-admin) : {user_id}")
-            return # Ignore silencieusement
-
+            return
     except Exception as e:
         print(f"[DEPLACER] Erreur vérification admin : {e}")
         return
-
-    # 2. Vérifier si c'est une réponse
     original_msg = msg.reply_to_message
     if not original_msg:
         try:
             await msg.reply_text("Usage: répondez à un message avec /deplacer")
         except Exception: pass
         return
-
-    # 3. Analyser le contenu du message original
     text_to_analyze = (original_msg.text or original_msg.caption or "").strip()
     text_lower = text_to_analyze.lower()
-    
     photo = original_msg.photo[-1].file_id if original_msg.photo else None
     video = original_msg.video.file_id if original_msg.video else None
-    # (Note : cette version ne déplace pas les albums, juste les messages simples)
-
-    # 4. Déterminer le topic de destination
     target_thread_id = None
     if any(word in text_lower for word in accident_keywords):
         target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
     elif any(word in text_lower for word in radar_keywords):
         target_thread_id = PUBLIC_TOPIC_RADARS_ID
     else:
-        target_thread_id = PUBLIC_TOPIC_GENERAL_ID # 'None' déplace vers "Général"
-
-    # 5. Vérifier si le message est déjà au bon endroit
+        target_thread_id = PUBLIC_TOPIC_GENERAL_ID
     if original_msg.message_thread_id == target_thread_id:
         try:
             m = await msg.reply_text("Ce message est déjà dans le bon topic.")
             await asyncio.sleep(3)
             await m.delete()
-            await msg.delete() # Supprime la commande /deplacer
+            await msg.delete()
         except Exception: pass
         return
-
-    # 6. Republier le contenu
     try:
         if photo:
             await context.bot.send_photo(
@@ -507,11 +518,8 @@ async def handle_deplacer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.reply_text("Ce type de message (ex: sticker, album) ne peut pas être déplacé.")
             return
-
-        # 7. Supprimer l'original (et la commande)
         await original_msg.delete()
-        await msg.delete() # Nettoie la commande /deplacer
-
+        await msg.delete()
     except Exception as e:
         print(f"[DEPLACER] Erreur publication/suppression : {e}")
         try:
@@ -559,6 +567,36 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db.commit()
                 return
 
+            # --- NOUVEAU : CAS REJETER & MUTER ---
+            if action == "REJECTMUTE":
+                try:
+                    # 1. Extraire l'ID de l'utilisateur
+                    user_id_str, _ = report_id.split("_", 1)
+                    user_id = int(user_id_str)
+                    
+                    # 2. Définir la date de fin du mute
+                    mute_until_ts = int(_now() + MUTE_DURATION_SPAM_SUBMISSION)
+                    
+                    # 3. Ajouter à la BDD
+                    await db.execute(
+                        "INSERT OR REPLACE INTO muted_users (user_id, mute_until_ts) VALUES (?, ?)",
+                        (user_id, mute_until_ts)
+                    )
+                    
+                    # 4. Supprimer le signalement
+                    await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
+                    
+                    await db.commit()
+                    
+                    await query.edit_message_text("🔇 Rejeté. Utilisateur muté pour 1 heure.")
+                    
+                except Exception as e:
+                    print(f"[ERREUR REJECTMUTE] {e}")
+                    try:
+                        await query.edit_message_text(f"Erreur lors du mute: {e}")
+                    except Exception: pass
+                return
+
             # --- CAS MODIFIER ---
             elif action == "EDIT":
                 current_text = info.get("text", "")
@@ -583,15 +621,13 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption_for_public = text if text else None
                 text_lower = text.lower() if text else ""
                 
-                # Les listes de mots-clés sont maintenant globales (en haut)
                 if any(word in text_lower for word in accident_keywords):
                     target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
                 elif any(word in text_lower for word in radar_keywords):
                     target_thread_id = PUBLIC_TOPIC_RADARS_ID
                 else:
-                    target_thread_id = PUBLIC_TOPIC_GENERAL_ID # Par défaut dans Général
+                    target_thread_id = PUBLIC_TOPIC_GENERAL_ID
 
-                # --- Publication ---
                 try:
                     if not files:
                         if text:
@@ -635,7 +671,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception: pass
                     return
                 
-                # --- Notification à l'utilisateur ---
                 try:
                     user_chat_id_str, _ = report_id.split("_", 1)
                     user_chat_id = int(user_chat_id_str)
@@ -646,7 +681,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     print(f"[ERREUR NOTIFY USER] {e} (User: {user_chat_id})")
                 
-                # --- Nettoyage BDD ---
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
                 return
@@ -678,11 +712,18 @@ async def cleaner_loop():
         now = _now()
         try:
             async with aiosqlite.connect(DB_NAME) as db:
+                # Nettoyer les signalements en attente trop vieux
                 cutoff_ts_pending = int(now - CLEAN_MAX_AGE_PENDING)
                 await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
+                
+                # Nettoyer les mutes expirés (toutes les heures)
                 if int(now) % 3600 == 0: 
-                    await db.execute("DELETE FROM edit_state")
+                    await db.execute("DELETE FROM edit_state") # Nettoie les états d'édition bloqués
+                    await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),)) # Nettoie les mutes finis
+                
                 await db.commit()
+
+            # Nettoyer les trackers de spam en mémoire
             cutoff_ts_spam = now - CLEAN_MAX_AGE_SPAM
             for uid in list(LAST_MSG_TIME.keys()):
                 if LAST_MSG_TIME[uid] < cutoff_ts_spam:
@@ -690,10 +731,13 @@ async def cleaner_loop():
             for uid in list(SPAM_COUNT.keys()):
                 if SPAM_COUNT[uid]["last"] < cutoff_ts_spam:
                     SPAM_COUNT.pop(uid, None)
+            
+            # Nettoyer les albums temporaires en mémoire
             cutoff_ts_albums = now - CLEAN_MAX_AGE_ALBUMS
             for mgid in list(TEMP_ALBUMS.keys()):
                 if TEMP_ALBUMS[mgid]["ts"] < cutoff_ts_albums:
                     TEMP_ALBUMS.pop(mgid, None)
+
         except Exception as e:
             print(f"[ERREUR CLEANER] {e}")
 
@@ -727,32 +771,22 @@ def start_bot_once():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # --- HANDLERS (dans le bon ordre) ---
-    
-    # 1. Clics sur les boutons (Admin)
+    # --- HANDLERS ---
     app.add_handler(CallbackQueryHandler(on_button_click))
-    
-    # 2. Commande /cancel (Admin)
     app.add_handler(CommandHandler(
         "cancel",
         handle_admin_cancel,
         filters=filters.Chat(ADMIN_GROUP_ID)
     ))
-
-    # 3. NOUVEAU : Commande /deplacer (Admin)
     app.add_handler(CommandHandler(
         "deplacer",
         handle_deplacer,
         filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
     ))
-
-    # 4. Messages texte pour la modification (Admin)
     app.add_handler(MessageHandler(
         filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, 
         handle_admin_edit
     ))
-    
-    # 5. Tous les autres messages (incluant les messages de service à supprimer)
     app.add_handler(MessageHandler(
         filters.ALL & ~filters.COMMAND, 
         handle_user_message
@@ -777,4 +811,3 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
-
