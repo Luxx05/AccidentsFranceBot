@@ -426,13 +426,28 @@ async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_deplacer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     
-    # 1. Vérifier si c'est un admin
+    # 1. NOUVELLE VÉRIFICATION D'ADMIN (gère l'anonymat)
     try:
-        admins_list = await context.bot.get_chat_administrators(PUBLIC_GROUP_ID)
-        admin_ids = {admin.user.id for admin in admins_list}
-        if msg.from_user.id not in admin_ids:
-            print(f"[DEPLACER] Ignoré (non-admin) : {msg.from_user.id}")
-            return # Ignore silencieusement si ce n'est pas un admin
+        user_id = msg.from_user.id
+        is_admin_check_passed = False
+
+        # 1a. Vérifier les ID système (admin anonyme ou publication en tant que canal)
+        # 1087968824 = 'Telegram' (Anonymous Admin)
+        # 136817688 = 'Group' (Publication au nom du groupe/canal)
+        if user_id in [1087968824, 136817688]:
+            is_admin_check_passed = True
+        
+        # 1b. Si ce n'est pas un ID système, vérifier si c'est un admin non-anonyme
+        else:
+            admins_list = await context.bot.get_chat_administrators(PUBLIC_GROUP_ID)
+            admin_ids = {admin.user.id for admin in admins_list}
+            if user_id in admin_ids:
+                is_admin_check_passed = True
+
+        if not is_admin_check_passed:
+            print(f"[DEPLACER] Ignoré (non-admin) : {user_id}")
+            return # Ignore silencieusement
+
     except Exception as e:
         print(f"[DEPLACER] Erreur vérification admin : {e}")
         return
@@ -451,6 +466,7 @@ async def handle_deplacer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     photo = original_msg.photo[-1].file_id if original_msg.photo else None
     video = original_msg.video.file_id if original_msg.video else None
+    # (Note : cette version ne déplace pas les albums, juste les messages simples)
 
     # 4. Déterminer le topic de destination
     target_thread_id = None
@@ -459,8 +475,6 @@ async def handle_deplacer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif any(word in text_lower for word in radar_keywords):
         target_thread_id = PUBLIC_TOPIC_RADARS_ID
     else:
-        # Si aucun mot-clé, on peut choisir de le mettre dans Général
-        # ou (mieux) de ne rien faire.
         target_thread_id = PUBLIC_TOPIC_GENERAL_ID # 'None' déplace vers "Général"
 
     # 5. Vérifier si le message est déjà au bon endroit
@@ -763,3 +777,4 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
