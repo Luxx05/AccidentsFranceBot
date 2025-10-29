@@ -595,7 +595,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user_chat_id = int(user_chat_id_str)
                     await context.bot.send_message(
                         chat_id=user_chat_id,
-                        text="✅ Ton signalement a été publié dans le canal @Accidents_France."
+                        text="✅ Ton signalement a été publié dans le canal @AccidentsFR."
                     )
                 except Exception as e:
                     print(f"[ERREUR NOTIFY USER] {e} (User: {user_chat_id})")
@@ -746,3 +746,4 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
