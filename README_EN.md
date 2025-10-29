@@ -7,7 +7,7 @@
 <h1 align="center">🚨 Accidents France Bot</h1>
 <p align="center">
   <b>Automated Telegram bot for the Accidents France community.</b><br>
-  Anonymous submissions, moderation, smart sorting (radars / accidents) and instant publication.
+  Anonymous submission, advanced moderation, smart sorting, and a persistent database.
 </p>
 
 <p align="center">
@@ -24,27 +24,46 @@
 
 ---
 
-## 🔧 Main Features
+## 🔧 Key Features
 
-- 📸 **Anonymous submission** of accident or radar videos, photos and reports  
-- 🧠 **Smart auto-sorting** to the correct topic:  
-  - 🎥 `Videos & Dashcams`  
-  - 📍 `Radars & Reports`  
-- 🧩 **Manual validation** by admins before publication  
-- 🚀 **Automatic posting** to the public group  
-- 🧱 Built-in **anti-flood** and spam protection  
-- ☁️ Hosted on **Render** with an integrated **keep-alive** system  
+### 👤 User Submissions (via Bot)
+- 📸 **Anonymous submission** of videos, photos, albums, and text reports.
+- 📬 **Author notification** when their submission is approved and published.
+- 🧱 **Simple anti-flood** for private submissions.
+
+### 🛡️ Admin Group
+- 🧩 **Manual moderation** by administrators before publication.
+- ✏️ **"Edit" button** to rewrite a post's caption before publishing (handles admin anonymity).
+- ❌ **`/cancel` command** to abort an edit.
+- 🧹 **Automatic cleanup** of service messages (e.g., "X joined the group").
+
+### 📢 Public Group
+- 🧠 **Smart sorting** of approved submissions into the correct topic:
+  - 🎥 `Vidéos & Dashcams`
+  - 📍 `Radars & Signalements`
+  - #️⃣ `Général` (default)
+- ⚙️ **Admin command `/deplacer`** to move a misplaced message into the correct topic (handles admin anonymity).
+- 🔇 **Automatic moderation**:
+  - **Anti-spam** (deletes messages sent too quickly).
+  - **Anti-gibberish** (deletes meaningless messages).
+  - **Auto-mute** (restricts spammers for 5 minutes).
+- 🧹 **Automatic cleanup** of service messages (group photo changes, etc.).
+
+### ⚙️ Backend
+- 🗃️ **Persistent Database (SQLite)**: No data loss for pending submissions or edit states, even if the bot restarts.
+- ☁️ Hosted on **Render** with a **keep-alive** system (via Flask).
 
 ---
 
 ## 📡 Project Structure
 
 | File | Description |
-|------|--------------|
+|----------|-------------|
 | `bot.py` | Main bot script |
-| `requirements.txt` | Python dependencies |
-| `Procfile` | Render startup configuration |
-| `README.md` | Project documentation |
+| `requirements.txt` | Python dependencies (Telegram, aiosqlite, flask, requests) |
+| `Procfile` | Render configuration |
+| `README.md` | Project documentation (French) |
+| `README_EN.md` | Project documentation (English) |
 | `assets/banner.png` | GitHub banner |
 
 ---
@@ -52,41 +71,43 @@
 ## ⚙️ Environment Variables
 
 | Variable | Description |
-|-----------|-------------|
+|-----------|--------------|
 | `BOT_TOKEN` | Telegram bot token (from @BotFather) |
-| `ADMIN_GROUP_ID` | Admin group ID for moderation |
-| `PUBLIC_GROUP_ID` | Public group ID for publication |
-| `KEEP_ALIVE_URL` | Render URL for the auto-ping system |
+| `ADMIN_GROUP_ID` | ID of the private moderation group |
+| `PUBLIC_GROUP_ID` | ID of the public group |
+| `KEEP_ALIVE_URL` | Render URL for the automatic ping |
+| `DB_PATH` | **[New]** Path to the DB file (e.g., `/var/data/bot_storage.db` on Render) |
 
 ---
 
 ## 🚀 Deployment
 
-1. Create a **Render Web Service (Free)**  
-2. Connect your **GitHub repository**  
-3. Add the required environment variables  
-4. The bot will ping your Render instance every 10 minutes to stay active  
+1. Create a **Render Web Service (Free)**.
+2. Connect your **GitHub repo**.
+3. Add the **Environment Variables** listed above.
+4. **Important:** Add a **"Persistent Disk"** on Render (e.g., mount path: `/var/data`) and use this path for the `DB_PATH` variable to prevent data loss.
+5. The bot pings itself every 10 minutes to stay active.
 
 ---
 
 ## 💬 Useful Links
 
-- 🛰️ **Main channel:** [@Accidents_France](https://t.me/Accidents_France)  
-- 👥 **Public group:** [t.me/AccidentsFR](https://t.me/AccidentsFR)  
+- 🛰️ **Main Channel:** [@Accidents_France](https://t.me/Accidents_France)
+- 👥 **Public Group:** [t.me/AccidentsFR](https://t.me/AccidentsFR)
 - 🤖 **Bot:** [@AccidentsFranceBot](https://t.me/AccidentsFranceBot)
 
 ---
 
-## 🧠 Coming Soon
+## 🧠 Future Features
 
-- 📩 Auto DM notification when a report is published  
-- 📊 Weekly stats on reports and activity  
-- 🛰️ Simplified geolocation for radar and accident reports  
+- 📊 Weekly statistics on submissions.
+- 🛰️ Simplified geolocation for radars and accidents.
+- 📂 Add support for moving (`/deplacer`) full albums.
 
 ---
 
 <p align="center">
-  <i>Project built to centralize accident, radar and dashcam reports across France.</i><br>
+  <i>Project developed to centralize accident reports, radar sightings, and dashcam videos in France.</i><br>
   <i>🔧 Flexible bot, reusable for other communities or projects.</i><br>
   <b>Created by L.S 🇫🇷</b>
 </p>
