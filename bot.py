@@ -682,15 +682,13 @@ def run_flask():
 # =========================================================
 
 def start_bot_once():
+    """Lance les threads annexes, initialise la DB, et lance le bot."""
+    
+    # 1. Lancer les threads non-async (keep-alive, flask)
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    try:
-        asyncio.run(init_db())
-    except Exception as e:
-        print(f"Échec critique de l'initialisation de la BDD. Arrêt. {e}")
-        return
-
+    # 2. Construire l'application Telegram
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # --- HANDLERS ---
@@ -698,13 +696,13 @@ def start_bot_once():
     # 1. Gère les clics sur les boutons (Approuver, Rejeter, Modifier)
     app.add_handler(CallbackQueryHandler(on_button_click))
     
-    # 2. NOUVEAU : Gère les réponses textuelles de l'admin (pour la modification)
+    # 2. Gère les réponses textuelles de l'admin (pour la modification)
     app.add_handler(MessageHandler(
         filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, 
         handle_admin_edit
     ))
     
-    # 3. NOUVEAU : Gère la commande /cancel de l'admin
+    # 3. Gère la commande /cancel de l'admin
     app.add_handler(CommandHandler(
         "cancel",
         handle_admin_cancel,
@@ -716,14 +714,26 @@ def start_bot_once():
         filters.ALL & ~filters.COMMAND, 
         handle_user_message
     ))
+    # --- FIN DES HANDLERS ---
 
-    # --- Tâches de fond ---
+
+    # --- Tâches de fond (post-init) ---
     async def post_init(application: ContextTypes.DEFAULT_TYPE):
+        """
+        Se lance juste AVANT le polling.
+        C'est le bon endroit pour initialiser la BDD.
+        """
         try:
+            # 1. Initialiser la BDD (créer les tables)
+            #    C'EST LE CHANGEMENT IMPORTANT :
+            await init_db() 
+            
+            # 2. Créer la connexion BDD partagée
             db = await aiosqlite.connect(DB_NAME)
             application.bot_data["db"] = db
             print("Connexion BDD partagée établie.")
             
+            # 3. Lancer les tâches de fond
             asyncio.create_task(worker_loop(application))
             asyncio.create_task(cleaner_loop(db))
         except Exception as e:
@@ -733,6 +743,8 @@ def start_bot_once():
 
     print("🚀 Bot démarré, en écoute…")
 
+    # 6. Lancer le polling (bloquant)
+    # C'est CETTE fonction qui gère l'event loop asyncio
     app.run_polling(
         poll_interval=POLL_INTERVAL,
         timeout=POLL_TIMEOUT,
@@ -740,4 +752,6 @@ def start_bot_once():
 
 
 if __name__ == "__main__":
+    # On ne fait plus rien d'async ici
     start_bot_once()
+
