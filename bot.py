@@ -19,7 +19,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
-    CommandHandler, # NOUVEAU
+    CommandHandler,
 )
 
 # =========================================================
@@ -31,7 +31,7 @@ ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1003294631521"))
 PUBLIC_GROUP_ID = int(os.getenv("PUBLIC_GROUP_ID", "-1003245719893"))
 KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", "https://accidentsfrancebot.onrender.com")
 
-DB_NAME = "bot_storage.db" # Assurez-vous que c'est /var/data/bot_storage.db sur Render
+DB_NAME = os.getenv("DB_PATH", "bot_storage.db") # Utilise /var/data/bot_storage.db sur Render
 
 SPAM_COOLDOWN = 4
 MUTE_THRESHOLD = 3
@@ -57,9 +57,7 @@ TEMP_ALBUMS = {}
 REVIEW_QUEUE = asyncio.Queue()
 ALREADY_FORWARDED_ALBUMS = set()
 
-# NOUVEAU : Pour suivre quel admin modifie quel signalement
-# {admin_user_id: report_id}
-EDITING_STATE = {}
+# L'ÉTAT D'ÉDITION EST MAINTENANT DANS LA BDD (EDITING_STATE supprimé)
 
 # =========================================================
 # INITIALISATION BASE DE DONNÉES
@@ -69,7 +67,6 @@ async def init_db():
     print("🗃️ Initialisation de la base de données SQLite...")
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            # MODIFIÉ : Ajout de user_name
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS pending_reports (
                     report_id TEXT PRIMARY KEY,
@@ -77,6 +74,13 @@ async def init_db():
                     files_json TEXT,
                     created_ts INTEGER,
                     user_name TEXT 
+                )
+            """)
+            # NOUVEAU : Table pour l'état d'édition
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS edit_state (
+                    admin_id INTEGER PRIMARY KEY,
+                    report_id TEXT
                 )
             """)
             await db.commit()
@@ -109,7 +113,6 @@ def _make_admin_preview(user_name: str, text: str | None, is_album: bool) -> str
     body = f"\n\n{text}" if text else ""
     return head + who + body
 
-# MODIFIÉ : Ajout du bouton "Modifier"
 def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -125,6 +128,7 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
 # GESTION DU CONTENU UTILISATEUR
 # =========================================================
 
+# ... (handle_user_message et finalize_album_later sont inchangés) ...
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -135,7 +139,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     media_group_id = msg.media_group_id
     
     # === Anti-spam groupe public ===
-    # (Cette section ignore déjà les messages du groupe admin)
     if chat_id == PUBLIC_GROUP_ID:
         user_id = user.id
         text_raw = (msg.text or msg.caption or "").strip()
@@ -198,12 +201,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
     # === fin anti-spam ===
 
-    # 🚫 ignore tout message venant du groupe public (après anti-spam)
-    # ou du groupe admin (géré par d'autres handlers)
     if chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID:
         return
 
-    # === Début traitement message privé ===
     try:
         db = context.bot_data["db"]
     except KeyError:
@@ -239,7 +239,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         files_json = json.dumps(files_list)
         created_ts = int(_now())
 
-        # MODIFIÉ : Ajout de user_name
         try:
             await db.execute(
                 "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
@@ -268,7 +267,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         TEMP_ALBUMS[media_group_id] = {
             "files": [],
             "text": piece_text,
-            "user_name": user_name, # user_name stocké ici
+            "user_name": user_name,
             "chat_id": chat_id,
             "ts": _now(),
             "done": False,
@@ -307,9 +306,8 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
     files_json = json.dumps(files_list)
     report_text = album["text"]
     created_ts = int(_now())
-    user_name = album["user_name"] # Récupération du user_name
+    user_name = album["user_name"]
 
-    # MODIFIÉ : Ajout de user_name
     try:
         await db.execute(
             "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
@@ -333,11 +331,11 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 
     TEMP_ALBUMS.pop(media_group_id, None)
 
-
 # =========================================================
 # ENVOI DANS LE GROUPE ADMIN + MODÉRATION
 # =========================================================
 
+# ... (send_report_to_admin est inchangé) ...
 async def send_report_to_admin(application, report_id: str, preview_text: str, files: list[dict]):
     kb = _build_mod_keyboard(report_id)
 
@@ -349,7 +347,7 @@ async def send_report_to_admin(application, report_id: str, preview_text: str, f
         )
     except Exception as e:
         print(f"[ADMIN SEND] erreur (texte) : {e}")
-        return # Si le texte échoue, inutile d'envoyer les médias
+        return
 
     if not files:
         return
@@ -384,22 +382,40 @@ async def send_report_to_admin(application, report_id: str, preview_text: str, f
     except Exception as e:
         print(f"[ADMIN SEND] erreur album media_group : {e}")
 
-# NOUVEAU : Handlers pour la modification par l'admin
+
+# MODIFIÉ : Utilise la BDD pour l'état d'édition
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère le message texte de l'admin après qu'il ait cliqué sur 'Modifier'."""
     msg = update.message
     if not msg:
         return
         
     admin_user_id = msg.from_user.id
-    report_id = EDITING_STATE.pop(admin_user_id, None)
+    db = context.bot_data["db"]
+    report_id = None
+    
+    try:
+        # Récupérer le report_id depuis la BDD
+        async with db.cursor() as cursor:
+            await cursor.execute("SELECT report_id FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+            row = await cursor.fetchone()
+            if row:
+                report_id = row[0]
+        
+        # Si l'admin n'était pas en train de modifier, on ignore
+        if not report_id:
+            print(f"[DEBUG] handle_admin_edit: no report_id for admin {admin_user_id}.")
+            return
 
-    # Si l'admin n'était pas en train de modifier, on ignore son message
-    if not report_id:
+        # Nettoyer l'état d'édition
+        await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+        await db.commit()
+            
+    except Exception as e:
+        print(f"[HANDLE ADMIN EDIT - DB READ/DELETE] {e}")
         return
 
     new_text = msg.text
-    db = context.bot_data["db"]
+    print(f"[DEBUG] handle_admin_edit: Updating {report_id} with text '{new_text}'")
 
     try:
         # Mettre à jour le texte en BDD
@@ -418,50 +434,59 @@ async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, files_json, user_name = row
         files = json.loads(files_json)
         
-        # Informer l'admin
         await msg.reply_text(f"✅ Texte mis à jour. Voici le nouvel aperçu :")
         
-        # Renvoyer le bloc de modération complet
         preview_text = _make_admin_preview(user_name, text, is_album=len(files) > 1)
         await send_report_to_admin(context.application, report_id, preview_text, files)
 
     except Exception as e:
-        print(f"[HANDLE ADMIN EDIT] {e}")
+        print(f"[HANDLE ADMIN EDIT - UPDATE] {e}")
         await msg.reply_text(f"Une erreur est survenue lors de la mise à jour : {e}")
 
+# MODIFIÉ : Utilise la BDD
 async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère la commande /cancel de l'admin."""
     admin_user_id = update.message.from_user.id
-    if admin_user_id in EDITING_STATE:
-        EDITING_STATE.pop(admin_user_id, None)
-        await update.message.reply_text("Modification annulée. Vous pouvez à nouveau utiliser les boutons.")
-    else:
-        await update.message.reply_text("Vous n'étiez pas en train de modifier un message.")
+    db = context.bot_data["db"]
+    
+    try:
+        # On vérifie s'il y avait un état
+        async with db.cursor() as cursor:
+            await cursor.execute("SELECT 1 FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+            row = await cursor.fetchone()
+            
+            if row:
+                await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+                await db.commit()
+                await update.message.reply_text("Modification annulée. Vous pouvez à nouveau utiliser les boutons.")
+            else:
+                await update.message.reply_text("Vous n'étiez pas en train de modifier un message.")
+                
+    except Exception as e:
+        print(f"[HANDLE ADMIN CANCEL] {e}")
 
 
+# MODIFIÉ : Utilise la BDD
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    
-    # NOUVEAU : Annule l'état d'édition si l'admin clique sur un bouton
     admin_user_id = query.from_user.id
-    EDITING_STATE.pop(admin_user_id, None)
-    
-    await query.answer() # Toujours répondre au callback rapidement
+    db = context.bot_data["db"]
+
+    try:
+        # Annule l'état d'édition si l'admin clique sur un bouton
+        await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+        await db.commit()
+    except Exception as e:
+        print(f"[ON BUTTON CLICK - DB CLEAN] {e}")
+
+    await query.answer()
 
     data = query.data
     action, report_id = data.split("|", 1)
 
-    try:
-        db = context.bot_data["db"]
-    except KeyError:
-        print("[ERREUR] Connexion DB non trouvée dans bot_data (on_button_click).")
-        return
-
-    # --- Récupération du signalement depuis la BDD ---
+    # --- Récupération du signalement ---
     info = None
     try:
         async with db.cursor() as cursor:
-            # MODIFIÉ : On récupère aussi user_name
             await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
             row = await cursor.fetchone()
             if row:
@@ -469,7 +494,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 info = {
                     "text": text_from_db,
                     "files": json.loads(files_json_from_db),
-                    "user_name": user_name_from_db # NOUVEAU
+                    "user_name": user_name_from_db
                 }
     except Exception as e:
         print(f"[ERREUR DB SELECT] {e}")
@@ -496,19 +521,24 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"[ERREUR DB DELETE REJECT] {e}")
         return
 
-    # --- NOUVEAU : CAS MODIFIER ---
+    # --- CAS MODIFIER ---
     elif action == "EDIT":
         current_text = info.get("text", "")
         try:
-            # On met l'admin en état d'édition
-            EDITING_STATE[admin_user_id] = report_id
+            # On met l'admin en état d'édition (dans la BDD)
+            await db.execute(
+                "INSERT OR REPLACE INTO edit_state (admin_id, report_id) VALUES (?, ?)", 
+                (admin_user_id, report_id)
+            )
+            await db.commit()
+            
             await query.edit_message_text(
                 f"✏️ **Modification en cours...**\n\n**Texte actuel :**\n`{current_text}`\n\nEnvoyez le nouveau texte. (ou envoyez /cancel pour annuler)",
-                reply_markup=None # On retire les boutons
+                reply_markup=None
             )
         except Exception as e:
             print(f"[EDIT BUTTON] {e}")
-        return # On attend le message de l'admin
+        return
 
     # --- CAS APPROUVE ---
     if action == "APPROVE":
@@ -516,7 +546,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (info["text"] or "").strip()
         caption_for_public = text if text else None
 
-        # --- Choix du topic ---
         text_lower = text.lower() if text else ""
         accident_keywords = ["accident", "accrochage", "carambolage", "choc", "collision", "crash", "sortie de route", "perte de contrôle", "dashcam", "vidéo accident", "camion couché", "freinage d'urgence", "percuté"]
         radar_keywords = ["radar", "contrôle", "controle", "flash", "flashé", "laser", "jumelle", "police", "gendarmerie", "banalisée", "radar caché", "radar mobile"]
@@ -559,7 +588,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 await query.edit_message_text("✅ Publié dans le groupe public.")
 
-            else:  # Album
+            else:
                 media_group = []
                 for i, m in enumerate(files):
                     caption = caption_for_public if i == 0 else None
@@ -583,7 +612,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
-        # --- NOUVEAU : Notification à l'utilisateur ---
+        # --- Notification à l'utilisateur ---
         try:
             user_chat_id_str, _ = report_id.split("_", 1)
             user_chat_id = int(user_chat_id_str)
@@ -593,9 +622,8 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             print(f"[ERREUR NOTIFY USER] {e} (User: {user_chat_id})")
-        # --- Fin notification ---
 
-        # --- Nettoyage BDD après succès ---
+        # --- Nettoyage BDD ---
         try:
             await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
             await db.commit()
@@ -607,6 +635,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # WORKER D'ENVOI VERS ADMIN + CLEANER MÉMOIRE
 # =========================================================
 
+# ... (worker_loop est inchangé) ...
 async def worker_loop(application):
     print("👷 Worker (asyncio) démarré")
     while True:
@@ -631,8 +660,12 @@ async def cleaner_loop(db: aiosqlite.Connection):
         try:
             # --- Nettoyage BDD (PENDING) ---
             cutoff_ts_pending = int(now - CLEAN_MAX_AGE_PENDING)
-            # MODIFIÉ : Prise en compte de la nouvelle colonne
             await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
+            
+            # NOUVEAU : Nettoyage BDD (edit_state) - très agressif (1h)
+            # (Normalement cette table est vide 99% du temps)
+            await db.execute("DELETE FROM edit_state") # Simple: on vide tout
+            
             await db.commit()
 
             # --- Nettoyage mémoire (anti-spam) ---
@@ -659,6 +692,7 @@ async def cleaner_loop(db: aiosqlite.Connection):
 # KEEP ALIVE (Render Free)
 # =========================================================
 
+# ... (keep_alive et run_flask sont inchangés) ...
 def keep_alive():
     while True:
         try:
@@ -676,7 +710,6 @@ def hello():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=10000, debug=False)
 
-
 # =========================================================
 # MAIN
 # =========================================================
@@ -684,32 +717,26 @@ def run_flask():
 def start_bot_once():
     """Lance les threads annexes, initialise la DB, et lance le bot."""
     
-    # 1. Lancer les threads non-async (keep-alive, flask)
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # 2. Construire l'application Telegram
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # --- HANDLERS ---
     
-    # 1. Gère les clics sur les boutons (Approuver, Rejeter, Modifier)
     app.add_handler(CallbackQueryHandler(on_button_click))
     
-    # 2. Gère les réponses textuelles de l'admin (pour la modification)
     app.add_handler(MessageHandler(
         filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, 
         handle_admin_edit
     ))
     
-    # 3. Gère la commande /cancel de l'admin
     app.add_handler(CommandHandler(
         "cancel",
         handle_admin_cancel,
         filters=filters.Chat(ADMIN_GROUP_ID)
     ))
 
-    # 4. Gère tous les autres messages (privés ou groupe public)
     app.add_handler(MessageHandler(
         filters.ALL & ~filters.COMMAND, 
         handle_user_message
@@ -719,21 +746,13 @@ def start_bot_once():
 
     # --- Tâches de fond (post-init) ---
     async def post_init(application: ContextTypes.DEFAULT_TYPE):
-        """
-        Se lance juste AVANT le polling.
-        C'est le bon endroit pour initialiser la BDD.
-        """
         try:
-            # 1. Initialiser la BDD (créer les tables)
-            #    C'EST LE CHANGEMENT IMPORTANT :
             await init_db() 
             
-            # 2. Créer la connexion BDD partagée
             db = await aiosqlite.connect(DB_NAME)
             application.bot_data["db"] = db
             print("Connexion BDD partagée établie.")
             
-            # 3. Lancer les tâches de fond
             asyncio.create_task(worker_loop(application))
             asyncio.create_task(cleaner_loop(db))
         except Exception as e:
@@ -743,8 +762,6 @@ def start_bot_once():
 
     print("🚀 Bot démarré, en écoute…")
 
-    # 6. Lancer le polling (bloquant)
-    # C'est CETTE fonction qui gère l'event loop asyncio
     app.run_polling(
         poll_interval=POLL_INTERVAL,
         timeout=POLL_TIMEOUT,
@@ -752,6 +769,4 @@ def start_bot_once():
 
 
 if __name__ == "__main__":
-    # On ne fait plus rien d'async ici
     start_bot_once()
-
