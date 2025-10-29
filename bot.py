@@ -559,7 +559,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db.commit()
                 return
 
-            # --- CAS REJETER & MUTER (MODIFIÉ) ---
+            # --- CAS REJETER & MUTER ---
             if action == "REJECTMUTE":
                 user_id = None
                 try:
@@ -578,7 +578,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     await query.edit_message_text("🔇 Rejeté. Utilisateur muté pour 1 heure.")
                     
-                    # Notifier l'utilisateur
                     if user_id:
                         mute_hours = mute_duration // 3600
                         message_text = f"❌ Votre soumission a été rejetée.\n\nVous avez été restreint d'envoyer de nouveaux signalements pour {mute_hours} heure(s) pour cause de spam/abus."
@@ -723,7 +722,8 @@ async def cleaner_loop():
                 if LAST_MSG_TIME[uid] < cutoff_ts_spam:
                     LAST_MSG_TIME.pop(uid, None)
             for uid in list(SPAM_COUNT.keys()):
-                if SPAM_COUNT[uid]["last"] < cutoff_T_SPAM:
+                # LIGNE CORRIGÉE CI-DESSOUS
+                if SPAM_COUNT[uid]["last"] < cutoff_ts_spam:
                     SPAM_COUNT.pop(uid, None)
             
             cutoff_ts_albums = now - CLEAN_MAX_AGE_ALBUMS
