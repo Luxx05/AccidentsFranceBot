@@ -37,7 +37,6 @@ SPAM_COOLDOWN = 4
 MUTE_THRESHOLD = 3
 MUTE_DURATION_SEC = 300
 
-# NOUVEAU : Durée du mute (en secondes) pour les trolls
 MUTE_DURATION_SPAM_SUBMISSION = 3600 # 1 heure
 
 CLEAN_MAX_AGE_PENDING = 3600 * 24
@@ -109,7 +108,6 @@ async def init_db():
                     report_id TEXT
                 )
             """)
-            # NOUVEAU : Table pour les utilisateurs mutés (des soumissions privées)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS muted_users (
                     user_id INTEGER PRIMARY KEY,
@@ -146,7 +144,6 @@ def _make_admin_preview(user_name: str, text: str | None, is_album: bool) -> str
     body = f"\n\n{text}" if text else ""
     return head + who + body
 
-# MODIFIÉ : Ajout du bouton "Rejeter & Muter"
 def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -190,7 +187,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     media_group_id = msg.media_group_id
     
     # 3. VÉRIFICATION MUTE (UNIQUEMENT EN PRIVÉ)
-    # Si le message vient d'un chat privé (chat_id == user.id)
     if chat_id == user.id:
         try:
             async with aiosqlite.connect(DB_NAME) as db:
@@ -203,19 +199,15 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     now = int(_now())
                     
                     if now < mute_until_ts:
-                        # L'utilisateur est toujours muté
                         remaining_min = (mute_until_ts - now) // 60 + 1
                         await msg.reply_text(f"❌ Vous avez été restreint d'envoyer des signalements pour spam.\nTemps restant : {remaining_min} minutes.")
-                        return # On bloque le message
+                        return
                     else:
-                        # Le mute a expiré, on nettoie
                         await db.execute("DELETE FROM muted_users WHERE user_id = ?", (user.id,))
                         await db.commit()
         except Exception as e:
             print(f"[ERREUR CHECK MUTE] {e}")
-            # On laisse passer en cas d'erreur DB, sécurité
     
-
     # 4. ANTI-SPAM (GROUPE PUBLIC)
     if chat_id == PUBLIC_GROUP_ID:
         text_raw = (msg.text or msg.caption or "").strip()
@@ -567,28 +559,33 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await db.commit()
                 return
 
-            # --- NOUVEAU : CAS REJETER & MUTER ---
+            # --- CAS REJETER & MUTER (MODIFIÉ) ---
             if action == "REJECTMUTE":
+                user_id = None
                 try:
-                    # 1. Extraire l'ID de l'utilisateur
                     user_id_str, _ = report_id.split("_", 1)
                     user_id = int(user_id_str)
                     
-                    # 2. Définir la date de fin du mute
-                    mute_until_ts = int(_now() + MUTE_DURATION_SPAM_SUBMISSION)
+                    mute_duration = MUTE_DURATION_SPAM_SUBMISSION
+                    mute_until_ts = int(_now() + mute_duration)
                     
-                    # 3. Ajouter à la BDD
                     await db.execute(
                         "INSERT OR REPLACE INTO muted_users (user_id, mute_until_ts) VALUES (?, ?)",
                         (user_id, mute_until_ts)
                     )
-                    
-                    # 4. Supprimer le signalement
                     await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
-                    
                     await db.commit()
                     
                     await query.edit_message_text("🔇 Rejeté. Utilisateur muté pour 1 heure.")
+                    
+                    # Notifier l'utilisateur
+                    if user_id:
+                        mute_hours = mute_duration // 3600
+                        message_text = f"❌ Votre soumission a été rejetée.\n\nVous avez été restreint d'envoyer de nouveaux signalements pour {mute_hours} heure(s) pour cause de spam/abus."
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=message_text
+                        )
                     
                 except Exception as e:
                     print(f"[ERREUR REJECTMUTE] {e}")
@@ -712,27 +709,23 @@ async def cleaner_loop():
         now = _now()
         try:
             async with aiosqlite.connect(DB_NAME) as db:
-                # Nettoyer les signalements en attente trop vieux
                 cutoff_ts_pending = int(now - CLEAN_MAX_AGE_PENDING)
                 await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
                 
-                # Nettoyer les mutes expirés (toutes les heures)
                 if int(now) % 3600 == 0: 
-                    await db.execute("DELETE FROM edit_state") # Nettoie les états d'édition bloqués
-                    await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),)) # Nettoie les mutes finis
+                    await db.execute("DELETE FROM edit_state")
+                    await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),))
                 
                 await db.commit()
 
-            # Nettoyer les trackers de spam en mémoire
             cutoff_ts_spam = now - CLEAN_MAX_AGE_SPAM
             for uid in list(LAST_MSG_TIME.keys()):
                 if LAST_MSG_TIME[uid] < cutoff_ts_spam:
                     LAST_MSG_TIME.pop(uid, None)
             for uid in list(SPAM_COUNT.keys()):
-                if SPAM_COUNT[uid]["last"] < cutoff_ts_spam:
+                if SPAM_COUNT[uid]["last"] < cutoff_T_SPAM:
                     SPAM_COUNT.pop(uid, None)
             
-            # Nettoyer les albums temporaires en mémoire
             cutoff_ts_albums = now - CLEAN_MAX_AGE_ALBUMS
             for mgid in list(TEMP_ALBUMS.keys()):
                 if TEMP_ALBUMS[mgid]["ts"] < cutoff_ts_albums:
