@@ -7,7 +7,7 @@
 <h1 align="center">🚨 Accidents France Bot</h1>
 <p align="center">
   <b>Automated Telegram bot for the Accidents France community.</b><br>
-  Anonymous submission, advanced moderation, smart sorting, and a persistent database.
+  Anonymous submission, advanced moderation, smart topic sorting, and a persistent database.
 </p>
 
 <p align="center">
@@ -26,15 +26,19 @@
 
 ## 🔧 Key Features
 
-### 👤 User Submissions (via Bot)
+### 👤 Submission (via Private Bot)
 - 📸 **Anonymous submission** of videos, photos, albums, and text reports.
 - 📬 **Author notification** when their submission is approved and published.
+- ⛔ **Author notification** if their submission is rejected and they are muted.
+- 🛡️ **Mute check**: The bot refuses submissions from a muted user.
 - 🧱 **Simple anti-flood** for private submissions.
 
 ### 🛡️ Admin Group
 - 🧩 **Manual moderation** by administrators before publication.
 - ✏️ **"Edit" button** to rewrite a post's caption before publishing (handles admin anonymity).
-- ❌ **`/cancel` command** to abort an edit.
+- 🔇 **"Reject & Mute 1h" button** to reject a submission and mute the author for 1 hour.
+- ❌ **`/cancel` command** to abort an ongoing edit.
+- 🚀 **Admin shortcut `/deplacer`**: Post a message directly from the admin group to the correct public topic.
 - 🧹 **Automatic cleanup** of service messages (e.g., "X joined the group").
 
 ### 📢 Public Group
@@ -46,11 +50,12 @@
 - 🔇 **Automatic moderation**:
   - **Anti-spam** (deletes messages sent too quickly).
   - **Anti-gibberish** (deletes meaningless messages).
-  - **Auto-mute** (restricts spammers for 5 minutes).
+  - **Auto-mute** (restricts group spammers for 5 minutes).
 - 🧹 **Automatic cleanup** of service messages (group photo changes, etc.).
+- 🤖 **Command menu** `/` displaying admin actions (`/deplacer`, `/cancel`).
 
 ### ⚙️ Backend
-- 🗃️ **Persistent Database (SQLite)**: No data loss for pending submissions or edit states, even if the bot restarts.
+- 🗃️ **Persistent Database (SQLite)**: No data loss for pending submissions, edit states, or muted users, even if the bot restarts.
 - ☁️ Hosted on **Render** with a **keep-alive** system (via Flask).
 
 ---
@@ -62,8 +67,8 @@
 | `bot.py` | Main bot script |
 | `requirements.txt` | Python dependencies (Telegram, aiosqlite, flask, requests) |
 | `Procfile` | Render configuration |
-| `README.md` | Project documentation (French) |
-| `README_EN.md` | Project documentation (English) |
+| `README.md` | Project documentation (FR) |
+| `README_EN.md` | Project documentation (EN) |
 | `assets/banner.png` | GitHub banner |
 
 ---
@@ -76,7 +81,7 @@
 | `ADMIN_GROUP_ID` | ID of the private moderation group |
 | `PUBLIC_GROUP_ID` | ID of the public group |
 | `KEEP_ALIVE_URL` | Render URL for the automatic ping |
-| `DB_PATH` | **[New]** Path to the DB file (e.g., `/var/data/bot_storage.db` on Render) |
+| `DB_PATH` | **[Required]** Path to the DB file (e.g., `/var/data/bot_storage.db` on Render) |
 
 ---
 
@@ -85,7 +90,7 @@
 1. Create a **Render Web Service (Free)**.
 2. Connect your **GitHub repo**.
 3. Add the **Environment Variables** listed above.
-4. **Important:** Add a **"Persistent Disk"** on Render (e.g., mount path: `/var/data`) and use this path for the `DB_PATH` variable to prevent data loss.
+4. **Important:** Add a **"Persistent Disk"** on Render (e.g., mount point `/var/data`) and use this path for the `DB_PATH` variable to prevent data loss.
 5. The bot pings itself every 10 minutes to stay active.
 
 ---
@@ -103,6 +108,7 @@
 - 📊 Weekly statistics on submissions.
 - 🛰️ Simplified geolocation for radars and accidents.
 - 📂 Add support for moving (`/deplacer`) full albums.
+- 🛡️ `/report` command for public group members.
 
 ---
 
