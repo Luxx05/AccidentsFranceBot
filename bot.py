@@ -31,7 +31,11 @@ ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1003294631521"))
 PUBLIC_GROUP_ID = int(os.getenv("PUBLIC_GROUP_ID", "-1003245719893"))
 KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", "https://accidentsfrancebot.onrender.com")
 
-DB_NAME = os.getenv("DB_PATH", "bot_storage.db") # Utilise /var/data/bot_storage.db sur Render
+# Important : Sur Render, utilise une variable d'environnement
+# KEY: DB_PATH
+# VALUE: /var/data/bot_storage.db
+# (Si tu laisses "bot_storage.db", elle sera effacée à chaque redémarrage)
+DB_NAME = os.getenv("DB_PATH", "bot_storage.db") 
 
 SPAM_COOLDOWN = 4
 MUTE_THRESHOLD = 3
@@ -57,8 +61,6 @@ TEMP_ALBUMS = {}
 REVIEW_QUEUE = asyncio.Queue()
 ALREADY_FORWARDED_ALBUMS = set()
 
-# L'ÉTAT D'ÉDITION EST MAINTENANT DANS LA BDD (EDITING_STATE supprimé)
-
 # =========================================================
 # INITIALISATION BASE DE DONNÉES
 # =========================================================
@@ -76,7 +78,6 @@ async def init_db():
                     user_name TEXT 
                 )
             """)
-            # NOUVEAU : Table pour l'état d'édition
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS edit_state (
                     admin_id INTEGER PRIMARY KEY,
@@ -84,7 +85,7 @@ async def init_db():
                 )
             """)
             await db.commit()
-        print("🗃️ Base de données prête.")
+        print(f"🗃️ Base de données prête sur '{DB_NAME}'.")
     except Exception as e:
         print(f"[ERREUR DB INIT] {e}")
         raise
@@ -128,7 +129,6 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
 # GESTION DU CONTENU UTILISATEUR
 # =========================================================
 
-# ... (handle_user_message et finalize_album_later sont inchangés) ...
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -147,10 +147,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         now_ts = _now()
         user_state = SPAM_COUNT.get(user_id, {"count": 0, "last": 0})
 
-        # 1. flood
         flood = _is_spam(user_id, media_group_id)
 
-        # 2. message nonsense
         gibberish = False
         if len(text) >= 5:
             consonnes = sum(1 for c in text if c in "bcdfghjklmnpqrstvwxyz")
@@ -204,12 +202,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID:
         return
 
-    try:
-        db = context.bot_data["db"]
-    except KeyError:
-        print("[ERREUR] Connexion DB non trouvée dans bot_data.")
-        return
-
     if _is_spam(user.id, media_group_id):
         try:
             await msg.reply_text("⏳ Doucement, envoie pas tout d'un coup 🙏")
@@ -240,11 +232,12 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         created_ts = int(_now())
 
         try:
-            await db.execute(
-                "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
-                (report_id, piece_text, files_json, created_ts, user_name)
-            )
-            await db.commit()
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute(
+                    "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
+                    (report_id, piece_text, files_json, created_ts, user_name)
+                )
+                await db.commit()
         except Exception as e:
             print(f"[ERREUR DB INSERT] {e}")
             return
@@ -282,10 +275,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     album["ts"] = _now()
 
-    asyncio.create_task(finalize_album_later(media_group_id, context, msg))
+    asyncio.create_task(finalize_album_later(media_group_id, context))
 
 
-async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE, original_msg):
+async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(0.5)
 
     album = TEMP_ALBUMS.get(media_group_id)
@@ -293,12 +286,6 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
         return
     album["done"] = True
     
-    try:
-        db = context.bot_data["db"]
-    except KeyError:
-        print("[ERREUR] Connexion DB non trouvée dans bot_data (finalize_album).")
-        return
-
     report_id = f"{album['chat_id']}_{media_group_id}"
     ALREADY_FORWARDED_ALBUMS.add(report_id)
 
@@ -309,11 +296,12 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
     user_name = album["user_name"]
 
     try:
-        await db.execute(
-            "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
-            (report_id, report_text, files_json, created_ts, user_name)
-        )
-        await db.commit()
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
+                (report_id, report_text, files_json, created_ts, user_name)
+            )
+            await db.commit()
     except Exception as e:
         print(f"[ERREUR DB INSERT ALBUM] {e}")
         return
@@ -325,7 +313,12 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
     })
 
     try:
-        await original_msg.reply_text("✅ Reçu (album). Vérif avant publication.")
+        # On doit utiliser l'application pour envoyer une réponse,
+        # car le 'message' original n'est pas passé en paramètre
+        await context.bot.send_message(
+            chat_id=album["chat_id"],
+            text="✅ Reçu (album). Vérif avant publication."
+        )
     except Exception:
         pass
 
@@ -335,7 +328,6 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 # ENVOI DANS LE GROUPE ADMIN + MODÉRATION
 # =========================================================
 
-# ... (send_report_to_admin est inchangé) ...
 async def send_report_to_admin(application, report_id: str, preview_text: str, files: list[dict]):
     kb = _build_mod_keyboard(report_id)
 
@@ -383,259 +375,244 @@ async def send_report_to_admin(application, report_id: str, preview_text: str, f
         print(f"[ADMIN SEND] erreur album media_group : {e}")
 
 
-# MODIFIÉ : Utilise la BDD pour l'état d'édition
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
         
     admin_user_id = msg.from_user.id
-    db = context.bot_data["db"]
     report_id = None
     
     try:
-        # Récupérer le report_id depuis la BDD
-        async with db.cursor() as cursor:
-            await cursor.execute("SELECT report_id FROM edit_state WHERE admin_id = ?", (admin_user_id,))
-            row = await cursor.fetchone()
-            if row:
-                report_id = row[0]
-        
-        # Si l'admin n'était pas en train de modifier, on ignore
-        if not report_id:
-            print(f"[DEBUG] handle_admin_edit: no report_id for admin {admin_user_id}.")
-            return
-
-        # Nettoyer l'état d'édition
-        await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
-        await db.commit()
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.cursor() as cursor:
+                await cursor.execute("SELECT report_id FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+                row = await cursor.fetchone()
+                if row:
+                    report_id = row[0]
             
+            if not report_id:
+                print(f"[DEBUG] handle_admin_edit: no report_id for admin {admin_user_id}.")
+                return
+
+            # Nettoyer l'état d'édition
+            await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+            
+            new_text = msg.text
+            print(f"[DEBUG] handle_admin_edit: Updating {report_id} with text '{new_text}'")
+
+            # Mettre à jour le texte en BDD
+            await db.execute("UPDATE pending_reports SET text = ? WHERE report_id = ?", (new_text, report_id))
+            await db.commit() # Commit les 2 opérations (DELETE et UPDATE)
+
+            # Recréer l'aperçu pour l'admin
+            async with db.cursor() as cursor:
+                await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
+                row = await cursor.fetchone()
+            
+            if not row:
+                await msg.reply_text("Erreur : Signalement introuvable après mise à jour.")
+                return
+
+            text, files_json, user_name = row
+            files = json.loads(files_json)
+            
+            await msg.reply_text(f"✅ Texte mis à jour. Voici le nouvel aperçu :")
+            
+            preview_text = _make_admin_preview(user_name, text, is_album=len(files) > 1)
+            # On utilise context.application pour send_report_to_admin
+            await send_report_to_admin(context.application, report_id, preview_text, files)
+
     except Exception as e:
-        print(f"[HANDLE ADMIN EDIT - DB READ/DELETE] {e}")
-        return
-
-    new_text = msg.text
-    print(f"[DEBUG] handle_admin_edit: Updating {report_id} with text '{new_text}'")
-
-    try:
-        # Mettre à jour le texte en BDD
-        await db.execute("UPDATE pending_reports SET text = ? WHERE report_id = ?", (new_text, report_id))
-        await db.commit()
-
-        # Recréer l'aperçu pour l'admin
-        async with db.cursor() as cursor:
-            await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
-            row = await cursor.fetchone()
-        
-        if not row:
-            await msg.reply_text("Erreur : Signalement introuvable après mise à jour.")
-            return
-
-        text, files_json, user_name = row
-        files = json.loads(files_json)
-        
-        await msg.reply_text(f"✅ Texte mis à jour. Voici le nouvel aperçu :")
-        
-        preview_text = _make_admin_preview(user_name, text, is_album=len(files) > 1)
-        await send_report_to_admin(context.application, report_id, preview_text, files)
-
-    except Exception as e:
-        print(f"[HANDLE ADMIN EDIT - UPDATE] {e}")
+        print(f"[HANDLE ADMIN EDIT - DB] {e}")
         await msg.reply_text(f"Une erreur est survenue lors de la mise à jour : {e}")
 
-# MODIFIÉ : Utilise la BDD
+
 async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_user_id = update.message.from_user.id
-    db = context.bot_data["db"]
     
     try:
-        # On vérifie s'il y avait un état
-        async with db.cursor() as cursor:
-            await cursor.execute("SELECT 1 FROM edit_state WHERE admin_id = ?", (admin_user_id,))
-            row = await cursor.fetchone()
-            
-            if row:
-                await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
-                await db.commit()
-                await update.message.reply_text("Modification annulée. Vous pouvez à nouveau utiliser les boutons.")
-            else:
-                await update.message.reply_text("Vous n'étiez pas en train de modifier un message.")
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.cursor() as cursor:
+                await cursor.execute("SELECT 1 FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+                row = await cursor.fetchone()
+                
+                if row:
+                    await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+                    await db.commit()
+                    await update.message.reply_text("Modification annulée. Vous pouvez à nouveau utiliser les boutons.")
+                else:
+                    await update.message.reply_text("Vous n'étiez pas en train de modifier un message.")
                 
     except Exception as e:
         print(f"[HANDLE ADMIN CANCEL] {e}")
 
 
-# MODIFIÉ : Utilise la BDD
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     admin_user_id = query.from_user.id
-    db = context.bot_data["db"]
-
+    
     try:
-        # Annule l'état d'édition si l'admin clique sur un bouton
-        await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
-        await db.commit()
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Annule l'état d'édition si l'admin clique sur un bouton
+            await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+            await db.commit()
     except Exception as e:
         print(f"[ON BUTTON CLICK - DB CLEAN] {e}")
+        # On ne bloque pas l'exécution pour ça
 
     await query.answer()
 
     data = query.data
     action, report_id = data.split("|", 1)
 
-    # --- Récupération du signalement ---
     info = None
     try:
-        async with db.cursor() as cursor:
-            await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
-            row = await cursor.fetchone()
-            if row:
-                text_from_db, files_json_from_db, user_name_from_db = row
-                info = {
-                    "text": text_from_db,
-                    "files": json.loads(files_json_from_db),
-                    "user_name": user_name_from_db
-                }
-    except Exception as e:
-        print(f"[ERREUR DB SELECT] {e}")
-        return
-
-    if not info:
-        try:
-            await query.edit_message_text("🚫 Déjà traité / introuvable.")
-        except Exception:
-            pass
-        return
-
-    # --- CAS REJET ---
-    if action == "REJECT":
-        try:
-            await query.edit_message_text("❌ Supprimé, non publié.")
-        except Exception:
-            pass
-        
-        try:
-            await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
-            await db.commit()
-        except Exception as e:
-            print(f"[ERREUR DB DELETE REJECT] {e}")
-        return
-
-    # --- CAS MODIFIER ---
-    elif action == "EDIT":
-        current_text = info.get("text", "")
-        try:
-            # On met l'admin en état d'édition (dans la BDD)
-            await db.execute(
-                "INSERT OR REPLACE INTO edit_state (admin_id, report_id) VALUES (?, ?)", 
-                (admin_user_id, report_id)
-            )
-            await db.commit()
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.cursor() as cursor:
+                await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
+                row = await cursor.fetchone()
+                if row:
+                    text_from_db, files_json_from_db, user_name_from_db = row
+                    info = {
+                        "text": text_from_db,
+                        "files": json.loads(files_json_from_db),
+                        "user_name": user_name_from_db
+                    }
             
-            await query.edit_message_text(
-                f"✏️ **Modification en cours...**\n\n**Texte actuel :**\n`{current_text}`\n\nEnvoyez le nouveau texte. (ou envoyez /cancel pour annuler)",
-                reply_markup=None
-            )
-        except Exception as e:
-            print(f"[EDIT BUTTON] {e}")
-        return
+            if not info:
+                try:
+                    await query.edit_message_text("🚫 Déjà traité / introuvable.")
+                except Exception:
+                    pass
+                return
 
-    # --- CAS APPROUVE ---
-    if action == "APPROVE":
-        files = info["files"]
-        text = (info["text"] or "").strip()
-        caption_for_public = text if text else None
-
-        text_lower = text.lower() if text else ""
-        accident_keywords = ["accident", "accrochage", "carambolage", "choc", "collision", "crash", "sortie de route", "perte de contrôle", "dashcam", "vidéo accident", "camion couché", "freinage d'urgence", "percuté"]
-        radar_keywords = ["radar", "contrôle", "controle", "flash", "flashé", "laser", "jumelle", "police", "gendarmerie", "banalisée", "radar caché", "radar mobile"]
-
-        if any(word in text_lower for word in accident_keywords):
-            target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
-        elif any(word in text_lower for word in radar_keywords):
-            target_thread_id = PUBLIC_TOPIC_RADARS_ID
-        else:
-            target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
-
-        # --- Publication ---
-        try:
-            if not files:
-                if text:
-                    await context.bot.send_message(
-                        chat_id=PUBLIC_GROUP_ID,
-                        text=text,
-                        message_thread_id=target_thread_id
-                    )
-                    await query.edit_message_text("✅ Publié (texte).")
-                else:
-                    await query.edit_message_text("❌ Rien à publier (vide).")
-
-            elif len(files) == 1:
-                m = files[0]
-                if m["type"] == "photo":
-                    await context.bot.send_photo(
-                        chat_id=PUBLIC_GROUP_ID,
-                        photo=m["file_id"],
-                        caption=caption_for_public,
-                        message_thread_id=target_thread_id
-                    )
-                else:
-                    await context.bot.send_video(
-                        chat_id=PUBLIC_GROUP_ID,
-                        video=m["file_id"],
-                        caption=caption_for_public,
-                        message_thread_id=target_thread_id
-                    )
-                await query.edit_message_text("✅ Publié dans le groupe public.")
-
-            else:
-                media_group = []
-                for i, m in enumerate(files):
-                    caption = caption_for_public if i == 0 else None
-                    if m["type"] == "photo":
-                        media_group.append(InputMediaPhoto(media=m["file_id"], caption=caption))
-                    else:
-                        media_group.append(InputMediaVideo(media=m["file_id"], caption=caption))
+            # --- CAS REJET ---
+            if action == "REJECT":
+                try:
+                    await query.edit_message_text("❌ Supprimé, non publié.")
+                except Exception:
+                    pass
                 
-                await context.bot.send_media_group(
-                    chat_id=PUBLIC_GROUP_ID,
-                    media=media_group,
-                    message_thread_id=target_thread_id
-                )
-                await query.edit_message_text("✅ Publié (album) dans le groupe public.")
-        
-        except Exception as e:
-            print(f"[ERREUR PUBLICATION] {e}")
-            try:
-                await query.edit_message_text(f"⚠️ Erreur publication: {e}")
-            except Exception:
-                pass
-            return
+                await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
+                await db.commit()
+                return
 
-        # --- Notification à l'utilisateur ---
-        try:
-            user_chat_id_str, _ = report_id.split("_", 1)
-            user_chat_id = int(user_chat_id_str)
-            await context.bot.send_message(
-                chat_id=user_chat_id,
-                text="✅ Ton signalement a été publié dans le canal @Accidents_France."
-            )
-        except Exception as e:
-            print(f"[ERREUR NOTIFY USER] {e} (User: {user_chat_id})")
+            # --- CAS MODIFIER ---
+            elif action == "EDIT":
+                current_text = info.get("text", "")
+                try:
+                    await db.execute(
+                        "INSERT OR REPLACE INTO edit_state (admin_id, report_id) VALUES (?, ?)", 
+                        (admin_user_id, report_id)
+                    )
+                    await db.commit()
+                    
+                    await query.edit_message_text(
+                        f"✏️ **Modification en cours...**\n\n**Texte actuel :**\n`{current_text}`\n\nEnvoyez le nouveau texte. (ou envoyez /cancel pour annuler)",
+                        reply_markup=None,
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    print(f"[EDIT BUTTON] {e}")
+                return
 
-        # --- Nettoyage BDD ---
-        try:
-            await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
-            await db.commit()
-        except Exception as e:
-            print(f"[ERREUR DB DELETE APPROVE] {e}")
-        return
+            # --- CAS APPROUVE ---
+            if action == "APPROVE":
+                files = info["files"]
+                text = (info["text"] or "").strip()
+                caption_for_public = text if text else None
+
+                text_lower = text.lower() if text else ""
+                accident_keywords = ["accident", "accrochage", "carambolage", "choc", "collision", "crash", "sortie de route", "perte de contrôle", "dashcam", "vidéo accident", "camion couché", "freinage d'urgence", "percuté"]
+                radar_keywords = ["radar", "contrôle", "controle", "flash", "flashé", "laser", "jumelle", "police", "gendarmerie", "banalisée", "radar caché", "radar mobile"]
+
+                if any(word in text_lower for word in accident_keywords):
+                    target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
+                elif any(word in text_lower for word in radar_keywords):
+                    target_thread_id = PUBLIC_TOPIC_RADARS_ID
+                else:
+                    target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
+
+                # --- Publication ---
+                try:
+                    if not files:
+                        if text:
+                            await context.bot.send_message(
+                                chat_id=PUBLIC_GROUP_ID,
+                                text=text,
+                                message_thread_id=target_thread_id
+                            )
+                            await query.edit_message_text("✅ Publié (texte).")
+                        else:
+                            await query.edit_message_text("❌ Rien à publier (vide).")
+
+                    elif len(files) == 1:
+                        m = files[0]
+                        if m["type"] == "photo":
+                            await context.bot.send_photo(
+                                chat_id=PUBLIC_GROUP_ID,
+                                photo=m["file_id"],
+                                caption=caption_for_public,
+                                message_thread_id=target_thread_id
+                            )
+                        else:
+                            await context.bot.send_video(
+                                chat_id=PUBLIC_GROUP_ID,
+                                video=m["file_id"],
+                                caption=caption_for_public,
+                                message_thread_id=target_thread_id
+                            )
+                        await query.edit_message_text("✅ Publié dans le groupe public.")
+
+                    else:
+                        media_group = []
+                        for i, m in enumerate(files):
+                            caption = caption_for_public if i == 0 else None
+                            if m["type"] == "photo":
+                                media_group.append(InputMediaPhoto(media=m["file_id"], caption=caption))
+                            else:
+                                media_group.append(InputMediaVideo(media=m["file_id"], caption=caption))
+                        
+                        await context.bot.send_media_group(
+                            chat_id=PUBLIC_GROUP_ID,
+                            media=media_group,
+                            message_thread_id=target_thread_id
+                        )
+                        await query.edit_message_text("✅ Publié (album) dans le groupe public.")
+                
+                except Exception as e:
+                    print(f"[ERREUR PUBLICATION] {e}")
+                    try:
+                        await query.edit_message_text(f"⚠️ Erreur publication: {e}")
+                    except Exception:
+                        pass
+                    return # On ne notifie pas et on ne supprime pas de la BDD
+
+                # --- Notification à l'utilisateur ---
+                try:
+                    user_chat_id_str, _ = report_id.split("_", 1)
+                    user_chat_id = int(user_chat_id_str)
+                    await context.bot.send_message(
+                        chat_id=user_chat_id,
+                        text="✅ Ton signalement a été publié dans le canal @Accidents_France."
+                    )
+                except Exception as e:
+                    print(f"[ERREUR NOTIFY USER] {e} (User: {user_chat_id})")
+
+                # --- Nettoyage BDD ---
+                await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
+                await db.commit()
+                return
+
+    except Exception as e:
+        print(f"[ERREUR ON_BUTTON_CLICK - GLOBAL] {e}")
+
 
 # =========================================================
 # WORKER D'ENVOI VERS ADMIN + CLEANER MÉMOIRE
 # =========================================================
 
-# ... (worker_loop est inchangé) ...
 async def worker_loop(application):
     print("👷 Worker (asyncio) démarré")
     while True:
@@ -651,22 +628,24 @@ async def worker_loop(application):
             await asyncio.sleep(1)
 
 
-async def cleaner_loop(db: aiosqlite.Connection):
+async def cleaner_loop():
     print("🧽 Cleaner démarré")
     while True:
         await asyncio.sleep(60)
         now = _now()
         
         try:
-            # --- Nettoyage BDD (PENDING) ---
-            cutoff_ts_pending = int(now - CLEAN_MAX_AGE_PENDING)
-            await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
-            
-            # NOUVEAU : Nettoyage BDD (edit_state) - très agressif (1h)
-            # (Normalement cette table est vide 99% du temps)
-            await db.execute("DELETE FROM edit_state") # Simple: on vide tout
-            
-            await db.commit()
+            async with aiosqlite.connect(DB_NAME) as db:
+                # --- Nettoyage BDD (PENDING) ---
+                cutoff_ts_pending = int(now - CLEAN_MAX_AGE_PENDING)
+                await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
+                
+                # Nettoyage BDD (edit_state) - (1h)
+                # (On ne le fait plus toutes les minutes, mais toutes les heures)
+                if int(now) % 3600 == 0: 
+                    await db.execute("DELETE FROM edit_state")
+                
+                await db.commit()
 
             # --- Nettoyage mémoire (anti-spam) ---
             cutoff_ts_spam = now - CLEAN_MAX_AGE_SPAM
@@ -692,7 +671,6 @@ async def cleaner_loop(db: aiosqlite.Connection):
 # KEEP ALIVE (Render Free)
 # =========================================================
 
-# ... (keep_alive et run_flask sont inchangés) ...
 def keep_alive():
     while True:
         try:
@@ -715,15 +693,12 @@ def run_flask():
 # =========================================================
 
 def start_bot_once():
-    """Lance les threads annexes, initialise la DB, et lance le bot."""
-    
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # --- HANDLERS ---
-    
     app.add_handler(CallbackQueryHandler(on_button_click))
     
     app.add_handler(MessageHandler(
@@ -747,14 +722,15 @@ def start_bot_once():
     # --- Tâches de fond (post-init) ---
     async def post_init(application: ContextTypes.DEFAULT_TYPE):
         try:
+            # 1. Initialiser la BDD (créer les tables)
             await init_db() 
             
-            db = await aiosqlite.connect(DB_NAME)
-            application.bot_data["db"] = db
-            print("Connexion BDD partagée établie.")
+            # (On ne crée plus de connexion partagée)
+            print("Connexion BDD partagée... [retirée, c'est mieux ainsi]")
             
+            # 3. Lancer les tâches de fond
             asyncio.create_task(worker_loop(application))
-            asyncio.create_task(cleaner_loop(db))
+            asyncio.create_task(cleaner_loop()) # Plus besoin de passer 'db'
         except Exception as e:
             print(f"[ERREUR POST_INIT] {e}")
 
