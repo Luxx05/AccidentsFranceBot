@@ -448,7 +448,71 @@ async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
         print(f"[HANDLE ADMIN CANCEL] {e}")
 
 
-async def handle_deplacer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# NOUVEAU : Raccourci /deplacer pour le groupe ADMIN
+async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    
+    # 1. Vérifier si c'est une réponse
+    original_msg = msg.reply_to_message
+    if not original_msg:
+        try:
+            await msg.reply_text("Usage: répondez à votre message avec /deplacer pour le publier.")
+        except Exception: pass
+        return
+
+    # 2. Analyser le contenu du message original
+    text_to_analyze = (original_msg.text or original_msg.caption or "").strip()
+    text_lower = text_to_analyze.lower()
+    
+    photo = original_msg.photo[-1].file_id if original_msg.photo else None
+    video = original_msg.video.file_id if original_msg.video else None
+    # (Note : ne gère pas les albums, juste les messages simples)
+
+    # 3. Déterminer le topic de destination
+    target_thread_id = None
+    if any(word in text_lower for word in accident_keywords):
+        target_thread_id = PUBLIC_TOPIC_VIDEOS_ID
+    elif any(word in text_lower for word in radar_keywords):
+        target_thread_id = PUBLIC_TOPIC_RADARS_ID
+    else:
+        target_thread_id = PUBLIC_TOPIC_GENERAL_ID # 'None' déplace vers "Général"
+
+    # 4. Republier le contenu dans le groupe PUBLIC
+    try:
+        if photo:
+            await context.bot.send_photo(
+                chat_id=PUBLIC_GROUP_ID, photo=photo, 
+                caption=text_to_analyze, message_thread_id=target_thread_id
+            )
+        elif video:
+            await context.bot.send_video(
+                chat_id=PUBLIC_GROUP_ID, video=video, 
+                caption=text_to_analyze, message_thread_id=target_thread_id
+            )
+        elif text_to_analyze:
+            await context.bot.send_message(
+                chat_id=PUBLIC_GROUP_ID, text=text_to_analyze, 
+                message_thread_id=target_thread_id
+            )
+        else:
+            await msg.reply_text("Ce type de message (ex: sticker, album) ne peut pas être publié.")
+            return
+
+        # 5. Confirmer et nettoyer
+        m = await msg.reply_text(f"✅ Message publié dans le groupe public.")
+        await asyncio.sleep(5) # Laisse 5 sec pour voir la confirmation
+        await m.delete()
+        await msg.delete() # Nettoie la commande /deplacer
+
+    except Exception as e:
+        print(f"[DEPLACER_ADMIN] Erreur publication : {e}")
+        try:
+            await msg.reply_text(f"Erreur lors de la publication : {e}")
+        except Exception: pass
+
+
+# MODIFIÉ : Renommé en handle_deplacer_public
+async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     try:
         user_id = msg.from_user.id
@@ -722,7 +786,6 @@ async def cleaner_loop():
                 if LAST_MSG_TIME[uid] < cutoff_ts_spam:
                     LAST_MSG_TIME.pop(uid, None)
             for uid in list(SPAM_COUNT.keys()):
-                # LIGNE CORRIGÉE CI-DESSOUS
                 if SPAM_COUNT[uid]["last"] < cutoff_ts_spam:
                     SPAM_COUNT.pop(uid, None)
             
@@ -766,20 +829,32 @@ def start_bot_once():
 
     # --- HANDLERS ---
     app.add_handler(CallbackQueryHandler(on_button_click))
+    
     app.add_handler(CommandHandler(
         "cancel",
         handle_admin_cancel,
         filters=filters.Chat(ADMIN_GROUP_ID)
     ))
+    
+    # NOUVEAU : /deplacer pour le groupe ADMIN
     app.add_handler(CommandHandler(
         "deplacer",
-        handle_deplacer,
+        handle_deplacer_admin,
+        filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY
+    ))
+    
+    # MODIFIÉ : /deplacer pour le groupe PUBLIC (renommé)
+    app.add_handler(CommandHandler(
+        "deplacer",
+        handle_deplacer_public,
         filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
     ))
+    
     app.add_handler(MessageHandler(
         filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, 
         handle_admin_edit
     ))
+    
     app.add_handler(MessageHandler(
         filters.ALL & ~filters.COMMAND, 
         handle_user_message
