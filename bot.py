@@ -597,19 +597,23 @@ async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TY
             if not rows:
                 raise Exception("Album non trouvé dans l'archive admin.")
             
-            for i, (msg_id, file_type, file_id, caption) in enumerate(rows):
-                message_ids_to_delete.append(msg_id)
-                if caption and not album_caption:
+            # Étape 1: Trouver la légende principale (la première non-vide)
+            for _, _, _, caption in rows:
+                if caption:
                     album_caption = caption
-                    text_to_analyze = caption
+                    break
+            
+            # Étape 2: Construire le groupe de médias
+            for i, (msg_id, file_type, file_id, _) in enumerate(rows):
+                message_ids_to_delete.append(msg_id)
+                
+                # CORRECTION : Appliquer la légende au premier item PENDANT sa création
+                current_caption = album_caption if i == 0 else None
                 
                 if file_type == 'photo':
-                    album_items.append(InputMediaPhoto(media=file_id))
+                    album_items.append(InputMediaPhoto(media=file_id, caption=current_caption))
                 elif file_type == 'video':
-                    album_items.append(InputMediaVideo(media=file_id))
-            
-            if album_items and album_caption:
-                album_items[0].caption = album_caption
+                    album_items.append(InputMediaVideo(media=file_id, caption=current_caption))
             
             # Republier l'album
             await context.bot.send_media_group(
@@ -728,22 +732,25 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
                     rows = await cursor.fetchall()
             
             if not rows:
-                # L'album est trop vieux (nettoyé par le cleaner), on déplace juste le message simple
                 raise Exception("Album non trouvé dans l'archive, déplacement simple.")
             
-            for i, (msg_id, file_type, file_id, caption) in enumerate(rows):
-                message_ids_to_delete.append(msg_id)
-                if caption and not album_caption: 
+            # Étape 1: Trouver la légende principale (la première non-vide)
+            for _, _, _, caption in rows:
+                if caption:
                     album_caption = caption
-                    text_to_analyze = caption
-                
-                if file_type == 'photo':
-                    album_items.append(InputMediaPhoto(media=file_id))
-                elif file_type == 'video':
-                    album_items.append(InputMediaVideo(media=file_id))
+                    break
             
-            if album_items and album_caption:
-                album_items[0].caption = album_caption
+            # Étape 2: Construire le groupe de médias
+            for i, (msg_id, file_type, file_id, _) in enumerate(rows):
+                message_ids_to_delete.append(msg_id)
+
+                # CORRECTION : Appliquer la légende au premier item PENDANT sa création
+                current_caption = album_caption if i == 0 else None
+
+                if file_type == 'photo':
+                    album_items.append(InputMediaPhoto(media=file_id, caption=current_caption))
+                elif file_type == 'video':
+                    album_items.append(InputMediaVideo(media=file_id, caption=current_caption))
             
             await context.bot.send_media_group(
                 chat_id=PUBLIC_GROUP_ID, 
@@ -1114,3 +1121,4 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
