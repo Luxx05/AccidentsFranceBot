@@ -13,7 +13,6 @@ from telegram import (
     InputMediaPhoto,
     InputMediaVideo,
 )
-# NOUVEAU : Importé pour le formatage du dashboard
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
@@ -23,6 +22,8 @@ from telegram.ext import (
     filters,
     CommandHandler,
 )
+# NOUVEAU : Importé pour la gestion des erreurs
+from telegram.error import Forbidden, BadRequest
 
 # =========================================================
 # CONFIG
@@ -44,7 +45,6 @@ MUTE_DURATION_SPAM_SUBMISSION = 3600 # 1 heure
 CLEAN_MAX_AGE_PENDING = 3600 * 24
 CLEAN_MAX_AGE_ALBUMS = 60
 CLEAN_MAX_AGE_SPAM = 3600
-# NOUVEAU : Durée de conservation de l'archive des médias (pour /deplacer)
 CLEAN_MAX_AGE_ARCHIVE = 3600 * 24 * 3 # 3 jours
 
 POLL_INTERVAL = 2.0
@@ -106,10 +106,12 @@ async def init_db():
                     user_name TEXT 
                 )
             """)
+            # MODIFIÉ : Ajout de prompt_message_id pour le nettoyage
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS edit_state (
                     admin_id INTEGER PRIMARY KEY,
-                    report_id TEXT
+                    report_id TEXT,
+                    prompt_message_id INTEGER
                 )
             """)
             await db.execute("""
@@ -118,8 +120,6 @@ async def init_db():
                     mute_until_ts INTEGER
                 )
             """)
-            
-            # NOUVEAU : Table pour archiver les médias des groupes (pour /deplacer les albums)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS media_archive (
                     message_id INTEGER,
@@ -132,7 +132,6 @@ async def init_db():
                     PRIMARY KEY (message_id, chat_id)
                 )
             """)
-            # NOUVEAU : Index pour accélérer la recherche d'albums
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_media_group_id 
                 ON media_archive (media_group_id, chat_id);
@@ -180,15 +179,17 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
         ]
     ])
     
-# NOUVEL OUTIL : Tâche pour supprimer des messages après un délai
 async def delete_after_delay(messages: list, delay_seconds: int):
     """Supprime une liste de messages après un certain délai."""
     await asyncio.sleep(delay_seconds)
     for msg in messages:
+        if not msg: continue
         try:
             await msg.delete()
-        except Exception:
+        except (Forbidden, BadRequest):
             pass # Ignore si déjà supprimé ou droits manquants
+        except Exception as e:
+            print(f"[DELETE_AFTER_DELAY] Erreur: {e}")
 
 # =========================================================
 # GESTION DU CONTENU UTILISATEUR
@@ -244,7 +245,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             print(f"[ERREUR CHECK MUTE] {e}")
     
     # 4. LOGIQUE DU GROUPE PUBLIC (ANTI-SPAM)
-    is_spam = False # On initialise 'is_spam'
+    is_spam = False
     if chat_id == PUBLIC_GROUP_ID:
         text_raw = (msg.text or msg.caption or "").strip()
         text = text_raw.lower()
@@ -288,13 +289,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     print(f"[ANTISPAM] admin notify fail: {e}")
             return
-        # --- Fin Anti-Spam ---
     
     # 5. ARCHIVAGE DES MÉDIAS (Admin + Public)
-    # CORRECTION : Cette logique est maintenant déplacée ici,
-    # elle écoute les deux groupes (admin et public)
     if (chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID) and (msg.photo or msg.video):
-        # On n'archive pas les messages de spam
         if not is_spam: 
             media_type = "video" if msg.video else "photo"
             file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
@@ -313,8 +310,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await db.commit()
             except Exception as e:
                 print(f"[ARCHIVAGE DB] Erreur: {e}")
-        
-        # C'est un message de groupe (archivé ou non), on a fini.
         return 
 
     # 6. IGNORER LES MESSAGES TEXTE (non-commandes) DES GROUPES
@@ -460,59 +455,98 @@ async def send_report_to_admin(application, report_id: str, preview_text: str, f
         print(f"[ADMIN SEND] erreur album media_group : {e}")
 
 
+# MODIFIÉ : Nettoyage auto des messages
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
     admin_user_id = msg.from_user.id
     report_id = None
+    prompt_message_id = None # NOUVEAU
+    
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as cursor:
-                await cursor.execute("SELECT report_id FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+                # NOUVEAU : On récupère aussi prompt_message_id
+                await cursor.execute("SELECT report_id, prompt_message_id FROM edit_state WHERE admin_id = ?", (admin_user_id,))
                 row = await cursor.fetchone()
                 if row:
-                    report_id = row[0]
+                    report_id, prompt_message_id = row
             if not report_id:
                 return
+            
+            # Nettoyer l'état d'édition
             await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
             new_text = msg.text
             await db.execute("UPDATE pending_reports SET text = ? WHERE report_id = ?", (new_text, report_id))
             await db.commit()
+            
+            # Recréer l'aperçu
             async with db.cursor() as cursor:
                 await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
                 row = await cursor.fetchone()
             if not row:
                 await msg.reply_text("Erreur : Signalement introuvable après mise à jour.")
                 return
+            
             text, files_json, user_name = row
             files = json.loads(files_json)
-            await msg.reply_text(f"✅ Texte mis à jour. Voici le nouvel aperçu :")
+            
+            # Envoyer la confirmation (et la stocker pour suppression)
+            sent_confirmation_msg = await msg.reply_text(f"✅ Texte mis à jour. Voici le nouvel aperçu :")
+            
+            # Envoyer le nouveau bloc de modération
             preview_text = _make_admin_preview(user_name, text, is_album=len(files) > 1)
             await send_report_to_admin(context.application, report_id, preview_text, files)
+            
+            # NOUVEAU : Nettoyage des 3 messages
+            await msg.delete() # Supprime le message de l'admin
+            await sent_confirmation_msg.delete() # Supprime la confirmation "Texte mis à jour"
+            if prompt_message_id:
+                try:
+                    await context.bot.delete_message(chat_id=ADMIN_GROUP_ID, message_id=prompt_message_id)
+                except Exception:
+                    pass # Le message a peut-être déjà été supprimé
+
     except Exception as e:
         print(f"[HANDLE ADMIN EDIT - DB] {e}")
         await msg.reply_text(f"Une erreur est survenue lors de la mise à jour : {e}")
 
 
+# MODIFIÉ : Nettoyage auto des messages
 async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_user_id = update.message.from_user.id
+    prompt_message_id = None
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as cursor:
-                await cursor.execute("SELECT 1 FROM edit_state WHERE admin_id = ?", (admin_user_id,))
+                # NOUVEAU : On récupère aussi prompt_message_id
+                await cursor.execute("SELECT prompt_message_id FROM edit_state WHERE admin_id = ?", (admin_user_id,))
                 row = await cursor.fetchone()
+                
                 if row:
+                    prompt_message_id = row[0]
                     await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
                     await db.commit()
-                    await update.message.reply_text("Modification annulée. Vous pouvez à nouveau utiliser les boutons.")
+                    
+                    sent_msg = await update.message.reply_text("Modification annulée.")
+                    
+                    # NOUVEAU : Nettoyage
+                    await update.message.delete() # Supprime /cancel
+                    asyncio.create_task(delete_after_delay([sent_msg], 5)) # Supprime "Modification annulée"
+                    if prompt_message_id:
+                        try:
+                            await context.bot.delete_message(chat_id=ADMIN_GROUP_ID, message_id=prompt_message_id)
+                        except Exception:
+                            pass
                 else:
-                    await update.message.reply_text("Vous n'étiez pas en train de modifier un message.")
+                    sent_msg = await update.message.reply_text("Vous n'étiez pas en train de modifier un message.")
+                    asyncio.create_task(delete_after_delay([update.message, sent_msg], 5))
+
     except Exception as e:
         print(f"[HANDLE ADMIN CANCEL] {e}")
 
 
-# NOUVEAU : /dashboard (Groupe Admin)
 async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     
@@ -528,9 +562,7 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await cursor.execute("SELECT COUNT(*) FROM muted_users WHERE mute_until_ts > ?", (int(_now()),))
                 muted_count = (await cursor.fetchone())[0]
         
-        # -2 car le bot et le compte "Group" ne sont pas des membres
         member_count = await context.bot.get_chat_member_count(PUBLIC_GROUP_ID)
-        # S'assurer que le compte est positif (si le bot n'est pas admin, get_chat_member_count peut renvoyer 0)
         member_count = max(0, member_count - 2) 
         
     except Exception as e:
@@ -541,7 +573,6 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
         return
 
-    # Formater le message
     text = f"""
 📊 <b>Tableau de Bord - AccidentsFR Bot</b>
 -----------------------------------
@@ -553,19 +584,15 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <i>(Ce message sera supprimé dans 60s)</i>
 """
     
-    # Envoyer et auto-supprimer
     try:
         sent_msg = await msg.reply_text(text, parse_mode=ParseMode.HTML)
         asyncio.create_task(delete_after_delay([msg, sent_msg], 60))
-        
     except Exception as e:
         print(f"[DASHBOARD] Erreur envoi: {e}")
 
 
-# MODIFIÉ : Raccourci /deplacer (Admin) - GÈRE LES ALBUMS
 async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    
     original_msg = msg.reply_to_message
     if not original_msg:
         try:
@@ -576,7 +603,6 @@ async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TY
     media_group_id = original_msg.media_group_id
     text_to_analyze = (original_msg.text or original_msg.caption or "").strip()
     
-    # Déterminer le topic de destination
     text_lower = text_to_analyze.lower()
     target_thread_id = PUBLIC_TOPIC_GENERAL_ID
     if any(word in text_lower for word in accident_keywords):
@@ -602,32 +628,25 @@ async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TY
             if not rows:
                 raise Exception("Album non trouvé dans l'archive admin.")
             
-            # Étape 1: Trouver la légende principale (la première non-vide)
             for _, _, _, caption in rows:
                 if caption:
                     album_caption = caption
                     break
             
-            # Étape 2: Construire le groupe de médias
             for i, (msg_id, file_type, file_id, _) in enumerate(rows):
                 message_ids_to_delete.append(msg_id)
-                
-                # CORRECTION : Appliquer la légende au premier item PENDANT sa création
                 current_caption = album_caption if i == 0 else None
-                
                 if file_type == 'photo':
                     album_items.append(InputMediaPhoto(media=file_id, caption=current_caption))
                 elif file_type == 'video':
                     album_items.append(InputMediaVideo(media=file_id, caption=current_caption))
             
-            # Republier l'album
             await context.bot.send_media_group(
                 chat_id=PUBLIC_GROUP_ID, 
                 media=album_items, 
                 message_thread_id=target_thread_id
             )
             
-            # Supprimer tous les anciens messages de l'album
             for msg_id in message_ids_to_delete:
                 try:
                     await context.bot.delete_message(ADMIN_GROUP_ID, msg_id)
@@ -657,13 +676,10 @@ async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 await msg.reply_text("Ce type de message (ex: sticker) ne peut pas être publié.")
                 return
-            
-            # Supprimer l'original
             await original_msg.delete()
         
-        # Confirmer et nettoyer
         m = await msg.reply_text(f"✅ Message publié dans le groupe public.")
-        asyncio.create_task(delete_after_delay([msg, m], 5)) # Supprime après 5s
+        asyncio.create_task(delete_after_delay([msg, m], 5))
 
     except Exception as e:
         print(f"[DEPLACER_ADMIN] Erreur publication : {e}")
@@ -672,7 +688,6 @@ async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception: pass
 
 
-# MODIFIÉ : /deplacer (Public) - GÈRE LES ALBUMS
 async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     
@@ -739,19 +754,14 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             if not rows:
                 raise Exception("Album non trouvé dans l'archive, déplacement simple.")
             
-            # Étape 1: Trouver la légende principale (la première non-vide)
             for _, _, _, caption in rows:
                 if caption:
                     album_caption = caption
                     break
             
-            # Étape 2: Construire le groupe de médias
             for i, (msg_id, file_type, file_id, _) in enumerate(rows):
                 message_ids_to_delete.append(msg_id)
-
-                # CORRECTION : Appliquer la légende au premier item PENDANT sa création
                 current_caption = album_caption if i == 0 else None
-
                 if file_type == 'photo':
                     album_items.append(InputMediaPhoto(media=file_id, caption=current_caption))
                 elif file_type == 'video':
@@ -795,12 +805,11 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             
             await original_msg.delete()
         
-        await msg.delete() # Nettoie la commande /deplacer
+        await msg.delete()
 
     except Exception as e:
         print(f"[DEPLACER] Erreur publication/suppression : {e}")
         try:
-            # Gérer le fallback si l'album n'est pas trouvé
             if "Album non trouvé" in str(e) and (original_msg.photo or original_msg.video):
                 print("[DEPLACER] Fallback en déplacement simple")
                 photo = original_msg.photo[-1].file_id if original_msg.photo else None
@@ -819,6 +828,8 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     admin_user_id = query.from_user.id
+    sent_msg = None # Pour l'auto-suppression
+    
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
@@ -843,7 +854,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     }
             if not info:
                 try:
-                    # MODIFIÉ : Auto-suppression
                     sent_msg = await query.edit_message_text("🚫 Déjà traité / introuvable.")
                     asyncio.create_task(delete_after_delay([sent_msg], 5))
                 except Exception: pass
@@ -852,7 +862,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # --- CAS REJET ---
             if action == "REJECT":
                 try:
-                    # MODIFIÉ : Auto-suppression
                     sent_msg = await query.edit_message_text("❌ Supprimé, non publié.")
                     asyncio.create_task(delete_after_delay([sent_msg], 5))
                 except Exception: pass
@@ -877,7 +886,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                     await db.commit()
                     
-                    # MODIFIÉ : Auto-suppression
                     sent_msg = await query.edit_message_text("🔇 Rejeté. Utilisateur muté pour 1 heure.")
                     asyncio.create_task(delete_after_delay([sent_msg], 5))
                     
@@ -892,7 +900,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     print(f"[ERREUR REJECTMUTE] {e}")
                     try:
-                        # MODIFIÉ : Auto-suppression (en cas d'erreur)
                         sent_msg = await query.edit_message_text(f"Erreur lors du mute: {e}")
                         asyncio.create_task(delete_after_delay([sent_msg], 10))
                     except Exception: pass
@@ -900,18 +907,21 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # --- CAS MODIFIER ---
             elif action == "EDIT":
-                # On ne supprime PAS ce message, car l'admin doit le lire
                 current_text = info.get("text", "")
                 try:
-                    await db.execute(
-                        "INSERT OR REPLACE INTO edit_state (admin_id, report_id) VALUES (?, ?)", 
-                        (admin_user_id, report_id)
-                    )
-                    await db.commit()
-                    await query.edit_message_text(
+                    # On sauvegarde l'ID du message "Modification en cours..."
+                    sent_prompt_msg = await query.edit_message_text(
                         f"✏️ **Modification en cours...**\n\n**Texte actuel :**\n`{current_text}`\n\nEnvoyez le nouveau texte. (ou envoyez /cancel pour annuler)",
                         reply_markup=None, parse_mode="Markdown"
                     )
+                    prompt_message_id = sent_prompt_msg.message_id
+                    
+                    await db.execute(
+                        "INSERT OR REPLACE INTO edit_state (admin_id, report_id, prompt_message_id) VALUES (?, ?, ?)", 
+                        (admin_user_id, report_id, prompt_message_id)
+                    )
+                    await db.commit()
+                    
                 except Exception as e:
                     print(f"[EDIT BUTTON] {e}")
                 return
@@ -930,7 +940,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     target_thread_id = PUBLIC_TOPIC_GENERAL_ID
 
-                sent_msg = None # On prépare la variable pour la confirmation
                 try:
                     if not files:
                         if text:
@@ -968,14 +977,12 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         sent_msg = await query.edit_message_text("✅ Publié (album) dans le groupe public.")
                 
-                    # MODIFIÉ : Lancer l'auto-suppression pour la confirmation
                     if sent_msg:
                         asyncio.create_task(delete_after_delay([sent_msg], 5))
 
                 except Exception as e:
                     print(f"[ERREUR PUBLICATION] {e}")
                     try:
-                        # MODIFIÉ : Auto-suppression (en cas d'erreur)
                         sent_msg = await query.edit_message_text(f"⚠️ Erreur publication: {e}")
                         asyncio.create_task(delete_after_delay([sent_msg], 10))
                     except Exception: pass
@@ -1022,22 +1029,18 @@ async def cleaner_loop():
         now = _now()
         try:
             async with aiosqlite.connect(DB_NAME) as db:
-                # Nettoyer les signalements en attente trop vieux
                 cutoff_ts_pending = int(now - CLEAN_MAX_AGE_PENDING)
                 await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
                 
-                # NOUVEAU : Nettoyer l'archive des médias
                 cutoff_ts_archive = int(now - CLEAN_MAX_AGE_ARCHIVE)
                 await db.execute("DELETE FROM media_archive WHERE timestamp < ?", (cutoff_ts_archive,))
                 
-                # Nettoyer les états d'édition bloqués et les mutes expirés (toutes les heures)
                 if int(now) % 3600 == 0: 
                     await db.execute("DELETE FROM edit_state")
                     await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),))
                 
                 await db.commit()
 
-            # Nettoyer les trackers de spam en mémoire
             cutoff_ts_spam = now - CLEAN_MAX_AGE_SPAM
             for uid in list(LAST_MSG_TIME.keys()):
                 if LAST_MSG_TIME[uid] < cutoff_ts_spam:
@@ -1046,7 +1049,6 @@ async def cleaner_loop():
                 if SPAM_COUNT[uid]["last"] < cutoff_ts_spam:
                     SPAM_COUNT.pop(uid, None)
             
-            # Nettoyer les albums temporaires en mémoire
             cutoff_ts_albums = now - CLEAN_MAX_AGE_ALBUMS
             for mgid in list(TEMP_ALBUMS.keys()):
                 if TEMP_ALBUMS[mgid]["ts"] < cutoff_ts_albums:
@@ -1094,7 +1096,6 @@ def start_bot_once():
         filters=filters.Chat(ADMIN_GROUP_ID)
     ))
     
-    # NOUVEAU : Commande /dashboard (Admin)
     app.add_handler(CommandHandler(
         "dashboard",
         handle_dashboard,
@@ -1118,7 +1119,6 @@ def start_bot_once():
         handle_admin_edit
     ))
     
-    # MODIFIÉ : Ce handler gère maintenant l'archivage des médias de groupe
     app.add_handler(MessageHandler(
         filters.ALL & ~filters.COMMAND, 
         handle_user_message
@@ -1143,6 +1143,3 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
-
-
-
