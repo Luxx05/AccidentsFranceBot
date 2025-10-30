@@ -35,27 +35,30 @@
 
 ### 🛡️ Groupe Admin
 - 🧩 **Validation manuelle** par les administrateurs avant publication.
-- ✏️ **Bouton "Modifier"** pour réécrire un texte avant publication (gère l'anonymat admin).
+- ✏️ **Bouton "Modifier"** pour réécrire un texte (gère l'anonymat admin et **s'auto-nettoie** après usage).
 - 🔇 **Bouton "Rejeter & Muter 1h"** pour rejeter un signalement et empêcher l'auteur de soumettre pendant 1h.
-- ❌ **Commande `/cancel`** pour annuler une modification en cours.
-- 🚀 **Raccourci admin `/deplacer`** : Publie un message directement depuis le groupe admin vers le bon topic public.
-- 🧹 **Nettoyage automatique** des messages de service (ex: "X a rejoint le groupe").
+- 📊 **Commande `/dashboard`** pour des statistiques en temps réel (Membres, Mutés, En attente) qui **s'auto-supprime**.
+- 🚀 **Raccourci admin `/deplacer`** : Publie un message (ou un **album complet**) directement vers le bon topic public.
+- 🧹 **Nettoyage automatique** :
+  - Tous les messages de service (ex: "X a rejoint le groupe").
+  - Toutes les confirmations de modération (`✅ Publié`, `❌ Supprimé`, etc.) **s'auto-suppriment** après 5 secondes.
 
 ### 📢 Groupe Public
 - 🧠 **Tri intelligent** des signalements approuvés vers le bon topic :  
   - 🎥 `Vidéos & Dashcams`  
   - 📍 `Radars & Signalements`
   - #️⃣ `Général` (par défaut)
-- ⚙️ **Commande admin `/deplacer`** pour ranger un message mal placé dans le bon topic (gère l'anonymat).
+- ⚙️ **Commande admin `/deplacer`** pour ranger un message (ou un **album complet**) mal placé (gère l'anonymat).
 - 🔇 **Modération automatique** :
   - **Anti-spam** (supprime les messages trop rapides).
   - **Anti-charabia** (supprime les messages sans signification).
   - **Mute automatique** (restreint les spammeurs du groupe pour 5 min).
 - 🧹 **Nettoyage automatique** des messages de service (changement de photo, etc.).
-- 🤖 **Menu de commandes** `/` affichant les actions admin (`/deplacer`, `/cancel`).
+- 🤖 **Menu de commandes** `/` affichant les actions admin (`/deplacer`, `/dashboard`, `/cancel`).
 
 ### ⚙️ Arrière-plan
-- 🗃️ **Base de données persistante (SQLite)** : Aucune perte de signalement, d'état de modification ou d'utilisateur "muté", même si le bot redémarre.
+- 🗃️ **Base de données persistante (SQLite)** : Aucune perte de donnée (signalements, mutes, archives) si le bot redémarre.
+- 📂 **Archivage des médias** : Le bot sauvegarde tous les médias (publics et admins) pour permettre le déplacement des albums.
 - ☁️ Hébergement sur **Render** avec système de **keep-alive** (via Flask).
 
 ---
@@ -107,7 +110,6 @@
 
 - 📊 Statistiques hebdomadaires sur les signalements.
 - 🛰️ Géolocalisation simplifiée des radars et accidents.
-- 📂 Gestion du déplacement (`/deplacer`) pour les albums complets.
 - 🛡️ Commande `/signaler` pour les membres du groupe public.
 
 ---
