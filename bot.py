@@ -843,14 +843,18 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     }
             if not info:
                 try:
-                    await query.edit_message_text("🚫 Déjà traité / introuvable.")
+                    # MODIFIÉ : Auto-suppression
+                    sent_msg = await query.edit_message_text("🚫 Déjà traité / introuvable.")
+                    asyncio.create_task(delete_after_delay([sent_msg], 5))
                 except Exception: pass
                 return
             
             # --- CAS REJET ---
             if action == "REJECT":
                 try:
-                    await query.edit_message_text("❌ Supprimé, non publié.")
+                    # MODIFIÉ : Auto-suppression
+                    sent_msg = await query.edit_message_text("❌ Supprimé, non publié.")
+                    asyncio.create_task(delete_after_delay([sent_msg], 5))
                 except Exception: pass
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
@@ -873,7 +877,9 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                     await db.commit()
                     
-                    await query.edit_message_text("🔇 Rejeté. Utilisateur muté pour 1 heure.")
+                    # MODIFIÉ : Auto-suppression
+                    sent_msg = await query.edit_message_text("🔇 Rejeté. Utilisateur muté pour 1 heure.")
+                    asyncio.create_task(delete_after_delay([sent_msg], 5))
                     
                     if user_id:
                         mute_hours = mute_duration // 3600
@@ -886,12 +892,15 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     print(f"[ERREUR REJECTMUTE] {e}")
                     try:
-                        await query.edit_message_text(f"Erreur lors du mute: {e}")
+                        # MODIFIÉ : Auto-suppression (en cas d'erreur)
+                        sent_msg = await query.edit_message_text(f"Erreur lors du mute: {e}")
+                        asyncio.create_task(delete_after_delay([sent_msg], 10))
                     except Exception: pass
                 return
 
             # --- CAS MODIFIER ---
             elif action == "EDIT":
+                # On ne supprime PAS ce message, car l'admin doit le lire
                 current_text = info.get("text", "")
                 try:
                     await db.execute(
@@ -921,6 +930,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     target_thread_id = PUBLIC_TOPIC_GENERAL_ID
 
+                sent_msg = None # On prépare la variable pour la confirmation
                 try:
                     if not files:
                         if text:
@@ -928,9 +938,9 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 chat_id=PUBLIC_GROUP_ID, text=text,
                                 message_thread_id=target_thread_id
                             )
-                            await query.edit_message_text("✅ Publié (texte).")
+                            sent_msg = await query.edit_message_text("✅ Publié (texte).")
                         else:
-                            await query.edit_message_text("❌ Rien à publier (vide).")
+                            sent_msg = await query.edit_message_text("❌ Rien à publier (vide).")
                     elif len(files) == 1:
                         m = files[0]
                         if m["type"] == "photo":
@@ -943,7 +953,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 chat_id=PUBLIC_GROUP_ID, video=m["file_id"],
                                 caption=caption_for_public, message_thread_id=target_thread_id
                             )
-                        await query.edit_message_text("✅ Publié dans le groupe public.")
+                        sent_msg = await query.edit_message_text("✅ Publié dans le groupe public.")
                     else:
                         media_group = []
                         for i, m in enumerate(files):
@@ -956,11 +966,18 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=PUBLIC_GROUP_ID, media=media_group,
                             message_thread_id=target_thread_id
                         )
-                        await query.edit_message_text("✅ Publié (album) dans le groupe public.")
+                        sent_msg = await query.edit_message_text("✅ Publié (album) dans le groupe public.")
+                
+                    # MODIFIÉ : Lancer l'auto-suppression pour la confirmation
+                    if sent_msg:
+                        asyncio.create_task(delete_after_delay([sent_msg], 5))
+
                 except Exception as e:
                     print(f"[ERREUR PUBLICATION] {e}")
                     try:
-                        await query.edit_message_text(f"⚠️ Erreur publication: {e}")
+                        # MODIFIÉ : Auto-suppression (en cas d'erreur)
+                        sent_msg = await query.edit_message_text(f"⚠️ Erreur publication: {e}")
+                        asyncio.create_task(delete_after_delay([sent_msg], 10))
                     except Exception: pass
                     return
                 
@@ -1126,5 +1143,6 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
 
 
