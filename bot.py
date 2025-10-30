@@ -244,6 +244,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             print(f"[ERREUR CHECK MUTE] {e}")
     
     # 4. LOGIQUE DU GROUPE PUBLIC (ANTI-SPAM)
+    is_spam = False # On initialise 'is_spam'
     if chat_id == PUBLIC_GROUP_ID:
         text_raw = (msg.text or msg.caption or "").strip()
         text = text_raw.lower()
@@ -289,25 +290,29 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         # --- Fin Anti-Spam ---
     
-    # 5. NOUVEAU : ARCHIVAGE DES MÉDIAS (Admin + Public)
+    # 5. ARCHIVAGE DES MÉDIAS (Admin + Public)
+    # CORRECTION : Cette logique est maintenant déplacée ici,
+    # elle écoute les deux groupes (admin et public)
     if (chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID) and (msg.photo or msg.video):
-        media_type = "video" if msg.video else "photo"
-        file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
-        caption = msg.caption or ""
-        
-        try:
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute(
-                    """
-                    INSERT OR REPLACE INTO media_archive 
-                    (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (msg.message_id, chat_id, media_group_id, file_id, media_type, caption, int(now_ts))
-                )
-                await db.commit()
-        except Exception as e:
-            print(f"[ARCHIVAGE DB] Erreur: {e}")
+        # On n'archive pas les messages de spam
+        if not is_spam: 
+            media_type = "video" if msg.video else "photo"
+            file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
+            caption = msg.caption or ""
+            
+            try:
+                async with aiosqlite.connect(DB_NAME) as db:
+                    await db.execute(
+                        """
+                        INSERT OR REPLACE INTO media_archive 
+                        (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (msg.message_id, chat_id, media_group_id, file_id, media_type, caption, int(now_ts))
+                    )
+                    await db.commit()
+            except Exception as e:
+                print(f"[ARCHIVAGE DB] Erreur: {e}")
         
         # C'est un message de groupe (archivé ou non), on a fini.
         return 
@@ -1121,4 +1126,5 @@ def start_bot_once():
 
 if __name__ == "__main__":
     start_bot_once()
+
 
