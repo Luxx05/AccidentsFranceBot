@@ -35,27 +35,30 @@
 
 ### 🛡️ Admin Group
 - 🧩 **Manual moderation** by administrators before publication.
-- ✏️ **"Edit" button** to rewrite a post's caption before publishing (handles admin anonymity).
+- ✏️ **"Edit" button** to rewrite a post's caption (supports admin anonymity and **auto-cleans** after use).
 - 🔇 **"Reject & Mute 1h" button** to reject a submission and mute the author for 1 hour.
-- ❌ **`/cancel` command** to abort an ongoing edit.
-- 🚀 **Admin shortcut `/deplacer`**: Post a message directly from the admin group to the correct public topic.
-- 🧹 **Automatic cleanup** of service messages (e.g., "X joined the group").
+- 📊 **`/dashboard` command** for real-time stats (Members, Muted, Pending) which **auto-deletes**.
+- 🚀 **Admin shortcut `/deplacer`**: Post a message (or a **full album**) directly to the correct public topic.
+- 🧹 **Automatic cleanup**:
+  - All service messages (e.g., "X joined the group").
+  - All moderation confirmations (`✅ Published`, `❌ Rejected`, etc.) **auto-delete** after 5 seconds.
 
 ### 📢 Public Group
 - 🧠 **Smart sorting** of approved submissions into the correct topic:
   - 🎥 `Vidéos & Dashcams`
   - 📍 `Radars & Signalements`
   - #️⃣ `Général` (default)
-- ⚙️ **Admin command `/deplacer`** to move a misplaced message into the correct topic (handles admin anonymity).
+- ⚙️ **Admin command `/deplacer`** to move a misplaced message (or a **full album**) to the correct topic (supports anonymity).
 - 🔇 **Automatic moderation**:
   - **Anti-spam** (deletes messages sent too quickly).
   - **Anti-gibberish** (deletes meaningless messages).
   - **Auto-mute** (restricts group spammers for 5 minutes).
 - 🧹 **Automatic cleanup** of service messages (group photo changes, etc.).
-- 🤖 **Command menu** `/` displaying admin actions (`/deplacer`, `/cancel`).
+- 🤖 **Command menu** `/` displaying admin actions (`/deplacer`, `/dashboard`, `/cancel`).
 
 ### ⚙️ Backend
-- 🗃️ **Persistent Database (SQLite)**: No data loss for pending submissions, edit states, or muted users, even if the bot restarts.
+- 🗃️ **Persistent Database (SQLite)**: No data loss (submissions, mutes, archives) if the bot restarts.
+- 📂 **Media Archiving**: The bot archives all media (public and admin) to enable moving full albums.
 - ☁️ Hosted on **Render** with a **keep-alive** system (via Flask).
 
 ---
@@ -107,7 +110,6 @@
 
 - 📊 Weekly statistics on submissions.
 - 🛰️ Simplified geolocation for radars and accidents.
-- 📂 Add support for moving (`/deplacer`) full albums.
 - 🛡️ `/report` command for public group members.
 
 ---
