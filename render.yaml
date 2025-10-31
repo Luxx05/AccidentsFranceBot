@@ -1,0 +1,25 @@
+version: "1"
+services:
+- type: web
+  name: AccidentsFranceBot
+  repo: https://github.com/Luxx05/AccidentsFranceBot # Assurez-vous que ce lien est correct
+  plan: free
+  region: frankfurt # CORRIGÉ : Serveur en Europe pour une meilleure latence
+  
+  envVars:
+  # VARIABLES SECRÈTES (Render vous demandera ces valeurs la première fois)
+  - key: BOT_TOKEN
+    sync: false
+  - key: ADMIN_GROUP_ID
+    sync: false
+  - key: PUBLIC_GROUP_ID
+    sync: false
+
+  # VARIABLES DÉFINIES DANS LE CODE (Valeurs par défaut)
+  - key: DB_PATH
+    value: bot_storage.db # Le fichier de BDD sera stocké de manière volatile
+  - key: PORT
+    value: 10000 
+    
+  dockerfilePath: ./Dockerfile
+  autoDeploy: true # Assure un redéploiement automatique après chaque modification sur GitHub
