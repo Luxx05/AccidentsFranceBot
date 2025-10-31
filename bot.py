@@ -12,12 +12,12 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
     InputMediaVideo,
-    ChatPermissions  # NOUVEAU : Importé pour le mute
+    ChatPermissions  # Importé pour le mute
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
-    Application,  # NOUVEAU : Importé pour post_init
+    Application,  # Importé pour post_init
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
@@ -25,6 +25,9 @@ from telegram.ext import (
     CommandHandler,
 )
 from telegram.error import Forbidden, BadRequest
+
+# NOUVEAU : Mémorise l'heure de démarrage pour le dashboard
+START_TIME = time.time()
 
 # =========================================================
 # CONFIG
@@ -34,7 +37,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1003294631521"))
 PUBLIC_GROUP_ID = int(os.getenv("PUBLIC_GROUP_ID", "-1003245719893"))
 
-# CORRIGÉ : Port pour Render
 PORT = int(os.getenv("PORT", "10000"))
 KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", "https://accidentsfrancebot.onrender.com")
 
@@ -277,7 +279,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
-                    # CORRIGÉ : Utilisation de ChatPermissions
                     await context.bot.restrict_chat_member(
                         chat_id=PUBLIC_GROUP_ID, 
                         user_id=user.id,
@@ -326,7 +327,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if chat_id == PUBLIC_GROUP_ID:
         return
     if chat_id == ADMIN_GROUP_ID:
-        # Laisser le handle_admin_edit (tout en bas) le gérer
         return
 
     # 7. TRAITEMENT DES MESSAGES PRIVÉS (SOUMISSIONS)
@@ -550,19 +550,39 @@ async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
         print(f"[HANDLE ADMIN CANCEL] {e}")
 
 
+# MODIFIÉ : Ajout de Disponibilité et État d'Édition
 async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     try:
         pending_count = 0
         muted_count = 0
+        edit_count = 0 # NOUVEAU
+
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as cursor:
                 await cursor.execute("SELECT COUNT(*) FROM pending_reports")
                 pending_count = (await cursor.fetchone())[0]
+                
                 await cursor.execute("SELECT COUNT(*) FROM muted_users WHERE mute_until_ts > ?", (int(_now()),))
                 muted_count = (await cursor.fetchone())[0]
+                
+                # NOUVEAU : Vérifier l'état d'édition
+                await cursor.execute("SELECT COUNT(*) FROM edit_state")
+                edit_count = (await cursor.fetchone())[0]
+        
         member_count = await context.bot.get_chat_member_count(PUBLIC_GROUP_ID)
         member_count = max(0, member_count - 2) 
+
+        # NOUVEAU : Calcul de la disponibilité
+        uptime_seconds = int(time.time() - START_TIME)
+        m, s = divmod(uptime_seconds, 60)
+        h, m = divmod(m, 60)
+        d, h = divmod(h, 24)
+        uptime_str = f"{d}j {h}h {m}m"
+
+        # NOUVEAU : Statut d'édition
+        edit_status = "🟢 Non" if edit_count == 0 else f"🔴 OUI ({edit_count} verrou)"
+        
     except Exception as e:
         print(f"[DASHBOARD] Erreur BDD/API: {e}")
         try:
@@ -570,16 +590,25 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_after_delay([msg, sent_msg], 60))
         except Exception: pass
         return
+
+    # MODIFIÉ : Nouveau format du message
     text = f"""
 📊 <b>Tableau de Bord - AccidentsFR Bot</b>
 -----------------------------------
 <b>État :</b> 🟢 En ligne
+<b>Disponibilité :</b> {uptime_str} (depuis {time.strftime('%d/%m %H:%M', time.localtime(START_TIME))})
+
+<b>Modération :</b>
 <b>Signalements en attente :</b> {pending_count}
 <b>Utilisateurs mutés (privé) :</b> {muted_count}
+<b>Édition en cours :</b> {edit_status}
+
+<b>Activité :</b>
 <b>Membres (Groupe Public) :</b> {member_count}
 
 <i>(Ce message sera supprimé dans 60s)</i>
 """
+    
     try:
         sent_msg = await msg.reply_text(text, parse_mode=ParseMode.HTML)
         asyncio.create_task(delete_after_delay([msg, sent_msg], 60))
@@ -807,7 +836,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             # Nettoyer l'état d'édition (s'il y en a un pour ce chat)
-            # au cas où un admin clique sur un bouton au lieu de /cancel
             try:
                 await db.execute("DELETE FROM edit_state WHERE chat_id = ?", (chat_id,))
                 await db.commit()
@@ -980,7 +1008,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # WORKER D'ENVOI VERS ADMIN + CLEANER MÉMOIRE
 # =========================================================
 
-async def worker_loop(application: Application): # Corrigé : Type Application
+async def worker_loop(application: Application):
     print("👷 Worker (asyncio) démarré")
     while True:
         try:
@@ -1047,14 +1075,12 @@ def hello():
     return "OK - bot alive"
 
 def run_flask():
-    # CORRIGÉ : Utilisation du port de Render
     flask_app.run(host="0.0.0.0", port=PORT, debug=False)
 
 # =========================================================
 # MAIN
 # =========================================================
 
-# CORRIGÉ : Signature pour post_init
 async def _post_init(application: Application):
     """Tâches à lancer après l'initialisation mais avant le polling."""
     try:
@@ -1069,7 +1095,6 @@ def main():
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # CORRIGÉ : Syntaxe moderne pour post_init
     app = (ApplicationBuilder()
            .token(BOT_TOKEN)
            .post_init(_post_init)
