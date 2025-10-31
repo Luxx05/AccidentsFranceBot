@@ -12,10 +12,12 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
     InputMediaVideo,
+    ChatPermissions  # NOUVEAU : Importé pour le mute
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
+    Application,  # NOUVEAU : Importé pour post_init
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
@@ -31,6 +33,9 @@ from telegram.error import Forbidden, BadRequest
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1003294631521"))
 PUBLIC_GROUP_ID = int(os.getenv("PUBLIC_GROUP_ID", "-1003245719893"))
+
+# CORRIGÉ : Port pour Render
+PORT = int(os.getenv("PORT", "10000"))
 KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", "https://accidentsfrancebot.onrender.com")
 
 DB_NAME = os.getenv("DB_PATH", "bot_storage.db") 
@@ -105,7 +110,6 @@ async def init_db():
                     user_name TEXT 
                 )
             """)
-            # MODIFIÉ : Clé primaire est chat_id, pour permettre l'anonymat
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS edit_state (
                     chat_id INTEGER PRIMARY KEY,
@@ -273,9 +277,16 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
+                    # CORRIGÉ : Utilisation de ChatPermissions
                     await context.bot.restrict_chat_member(
-                        chat_id=PUBLIC_GROUP_ID, user_id=user.id,
-                        permissions={"can_send_messages": False, "can_send_media_messages": False, "can_send_other_messages": False, "can_add_web_page_previews": False},
+                        chat_id=PUBLIC_GROUP_ID, 
+                        user_id=user.id,
+                        permissions=ChatPermissions(
+                            can_send_messages=False,
+                            can_send_media_messages=False,
+                            can_send_other_messages=False,
+                            can_add_web_page_previews=False
+                        ),
                         until_date=until_ts
                     )
                 except Exception as e:
@@ -312,7 +323,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return 
 
     # 6. IGNORER LES MESSAGES TEXTE (non-commandes) DES GROUPES
-    # MODIFIÉ : On laisse passer les messages texte du groupe admin pour handle_admin_edit
     if chat_id == PUBLIC_GROUP_ID:
         return
     if chat_id == ADMIN_GROUP_ID:
@@ -425,7 +435,7 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 # GESTION ADMIN
 # =========================================================
 
-async def send_report_to_admin(application, report_id: str, preview_text: str, files: list[dict]):
+async def send_report_to_admin(application: Application, report_id: str, preview_text: str, files: list[dict]):
     kb = _build_mod_keyboard(report_id)
     try:
         await application.bot.send_message(
@@ -458,7 +468,6 @@ async def send_report_to_admin(application, report_id: str, preview_text: str, f
         print(f"[ADMIN SEND] erreur album media_group : {e}")
 
 
-# MODIFIÉ : Logique de "verrouillage par chat" (anonyme) + auto-nettoyage
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -475,15 +484,13 @@ async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if row:
                     report_id, prompt_message_id = row
             if not report_id:
-                return # Pas d'édition en cours, on ignore le message
+                return
             
-            # 1. Verrouillage levé : on supprime l'état d'édition
             await db.execute("DELETE FROM edit_state WHERE chat_id = ?", (chat_id,))
             new_text = msg.text
             await db.execute("UPDATE pending_reports SET text = ? WHERE report_id = ?", (new_text, report_id))
             await db.commit()
             
-            # 2. Recréer l'aperçu
             async with db.cursor() as cursor:
                 await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
                 row = await cursor.fetchone()
@@ -499,21 +506,19 @@ async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             preview_text = _make_admin_preview(user_name, text, is_album=len(files) > 1)
             await send_report_to_admin(context.application, report_id, preview_text, files)
             
-            # 3. Nettoyage des 3 messages
-            await msg.delete() # Supprime le message de l'admin (nouveau texte)
-            await sent_confirmation_msg.delete() # Supprime la confirmation "Texte mis à jour"
+            await msg.delete()
+            await sent_confirmation_msg.delete()
             if prompt_message_id:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=prompt_message_id)
                 except Exception:
-                    pass # Le message "Modification en cours..."
+                    pass
 
     except Exception as e:
         print(f"[HANDLE ADMIN EDIT - DB] {e}")
         await msg.reply_text(f"Une erreur est survenue lors de la mise à jour : {e}")
 
 
-# MODIFIÉ : Logique de "verrouillage par chat" (anonyme) + auto-nettoyage
 async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = msg.chat_id
@@ -526,20 +531,18 @@ async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
                 if row:
                     prompt_message_id = row[0]
-                    # 1. Verrouillage levé
                     await db.execute("DELETE FROM edit_state WHERE chat_id = ?", (chat_id,))
                     await db.commit()
                     
                     sent_msg = await msg.reply_text("Modification annulée.")
                     
-                    # 2. Nettoyage
-                    await msg.delete() # Supprime /cancel
+                    await msg.delete()
                     asyncio.create_task(delete_after_delay([sent_msg], 5))
                     if prompt_message_id:
                         try:
                             await context.bot.delete_message(chat_id=chat_id, message_id=prompt_message_id)
                         except Exception:
-                            pass # Supprime "Modification en cours..."
+                            pass
                 else:
                     sent_msg = await msg.reply_text("Vous n'étiez pas en train de modifier un message.")
                     asyncio.create_task(delete_after_delay([msg, sent_msg], 5))
@@ -750,7 +753,7 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
                     await context.bot.delete_message(PUBLIC_GROUP_ID, msg_id)
                 except Exception as e:
                     print(f"[DEPLACER] Erreur suppression msg album {msg_id}: {e}")
-        # --- CAS 2: CE N'EST PAS UN ALBUM (Média simple ou Texte) ---
+        # --- CAS 2: CE N'EST PAS UN ALBUM ---
         else:
             photo = original_msg.photo[-1].file_id if original_msg.photo else None
             video = original_msg.video.file_id if original_msg.video else None
@@ -794,24 +797,23 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 
 async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # MODIFIÉ : On ne nettoie plus l'état d'édition ici
-    # (cela annulerait l'édition d'un autre admin si on clique sur un autre bouton)
-    # admin_user_id = query.from_user.id
-    # try:
-    #     async with aiosqlite.connect(DB_NAME) as db:
-    #         await db.execute("DELETE FROM edit_state WHERE admin_id = ?", (admin_user_id,))
-    #         await db.commit()
-    # ...
-    
     await query.answer()
     data = query.data
     action, report_id = data.split("|", 1)
     info = None
     sent_msg = None
-    chat_id = query.message.chat_id # NOUVEAU : On récupère le chat_id
+    chat_id = query.message.chat_id
     
     try:
         async with aiosqlite.connect(DB_NAME) as db:
+            # Nettoyer l'état d'édition (s'il y en a un pour ce chat)
+            # au cas où un admin clique sur un bouton au lieu de /cancel
+            try:
+                await db.execute("DELETE FROM edit_state WHERE chat_id = ?", (chat_id,))
+                await db.commit()
+            except Exception as e:
+                print(f"[ON BUTTON CLICK - DB CLEAN] {e}")
+
             async with db.cursor() as cursor:
                 await cursor.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
                 row = await cursor.fetchone()
@@ -871,7 +873,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif action == "EDIT":
                 current_text = info.get("text", "")
                 try:
-                    # On tente d'insérer le verrouillage par chat_id
                     sent_prompt_msg = await query.edit_message_text(
                         f"✏️ **Modification en cours...**\n\n**Texte actuel :**\n`{current_text}`\n\nEnvoyez le nouveau texte. (ou envoyez /cancel pour annuler)",
                         reply_markup=None, parse_mode="Markdown"
@@ -883,13 +884,11 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         (chat_id, report_id, prompt_message_id)
                     )
                     await db.commit()
+                    
                 except Exception as e:
-                    # Si ça échoue (probablement PRIMARY KEY), c'est qu'une édition est déjà en cours
                     print(f"[EDIT BUTTON] Erreur (ou édition déjà en cours): {e}")
                     try:
-                        # On annule le message "Modification en cours..."
                         await context.bot.delete_message(chat_id, prompt_message_id)
-                        # On prévient l'admin
                         sent_msg = await context.bot.send_message(
                             chat_id=chat_id,
                             text="⚠️ Une modification est déjà en cours. Veuillez terminer ou annuler (/cancel) la précédente."
@@ -981,7 +980,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # WORKER D'ENVOI VERS ADMIN + CLEANER MÉMOIRE
 # =========================================================
 
-async def worker_loop(application):
+async def worker_loop(application: Application): # Corrigé : Type Application
     print("👷 Worker (asyncio) démarré")
     while True:
         try:
@@ -1048,17 +1047,33 @@ def hello():
     return "OK - bot alive"
 
 def run_flask():
-    flask_app.run(host="0.0.0.0", port=10000, debug=False)
+    # CORRIGÉ : Utilisation du port de Render
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False)
 
 # =========================================================
 # MAIN
 # =========================================================
 
-def start_bot_once():
+# CORRIGÉ : Signature pour post_init
+async def _post_init(application: Application):
+    """Tâches à lancer après l'initialisation mais avant le polling."""
+    try:
+        await init_db() 
+        print("Connexion BDD partagée... [retirée, c'est mieux ainsi]")
+        asyncio.create_task(worker_loop(application))
+        asyncio.create_task(cleaner_loop())
+    except Exception as e:
+        print(f"[ERREUR POST_INIT] {e}")
+
+def main():
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # CORRIGÉ : Syntaxe moderne pour post_init
+    app = (ApplicationBuilder()
+           .token(BOT_TOKEN)
+           .post_init(_post_init)
+           .build())
 
     # --- HANDLERS ---
     app.add_handler(CallbackQueryHandler(on_button_click))
@@ -1098,16 +1113,6 @@ def start_bot_once():
     ))
     # --- FIN DES HANDLERS ---
 
-    async def post_init(application: ContextTypes.DEFAULT_TYPE):
-        try:
-            await init_db() 
-            print("Connexion BDD partagée... [retirée, c'est mieux ainsi]")
-            asyncio.create_task(worker_loop(application))
-            asyncio.create_task(cleaner_loop())
-        except Exception as e:
-            print(f"[ERREUR POST_INIT] {e}")
-
-    app.post_init = post_init
     print("🚀 Bot démarré, en écoute…")
     app.run_polling(
         poll_interval=POLL_INTERVAL,
@@ -1115,4 +1120,4 @@ def start_bot_once():
     )
 
 if __name__ == "__main__":
-    start_bot_once()
+    main()
