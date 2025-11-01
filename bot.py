@@ -126,6 +126,7 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS idx_media_group_id
                 ON media_archive (media_group_id, chat_id);
             """)
+            # Trace des messages postés dans ADMIN (pour purge lors d’édition)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS admin_outbox (
                     report_id TEXT,
@@ -133,6 +134,7 @@ async def init_db():
                     PRIMARY KEY (report_id, message_id)
                 )
             """)
+            # Table pour le /lock
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS bot_state (
                     key TEXT PRIMARY KEY,
@@ -320,7 +322,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
-                    # ******** CORRECTION CRITIQUE ICI ********
+                    # CORRIGÉ : Utilisation de la syntaxe V21+ (la même que pour /lock)
                     await context.bot.restrict_chat_member(
                         chat_id=PUBLIC_GROUP_ID,
                         user_id=user.id,
@@ -333,7 +335,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             can_send_video_notes=False,
                             can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_stickers_and_emoji=False, # Syntaxe V21+
+                            can_send_stickers=False,
                             can_add_web_page_previews=False,
                             can_invite_users=False,
                             can_change_info=False,
@@ -1118,7 +1120,7 @@ DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_video_notes=True,
     can_send_voice_notes=True,
     can_send_polls=True,
-    can_send_stickers_and_emoji=True, # CORRIGÉ
+    can_send_stickers=True,
     can_add_web_page_previews=True,
     can_invite_users=True,
     can_change_info=False,
@@ -1134,7 +1136,7 @@ LOCK_PERMISSIONS = ChatPermissions(
     can_send_video_notes=False,
     can_send_voice_notes=False,
     can_send_polls=False,
-    can_send_stickers_and_emoji=False, # CORRIGIGÉ
+    can_send_stickers=False,
     can_add_web_page_previews=False,
     can_invite_users=False,
     can_change_info=False,
