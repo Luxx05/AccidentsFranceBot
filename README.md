@@ -37,7 +37,7 @@
 - 🧩 **Validation manuelle** par les administrateurs avant publication.
 - ✏️ **Bouton "Modifier"** pour réécrire un texte (gère l'anonymat admin et **s'auto-nettoie** après usage).
 - 🔇 **Bouton "Rejeter & Muter 1h"** pour rejeter un signalement et empêcher l'auteur de soumettre pendant 1h.
-- 📊 **Commande `/dashboard`** pour des statistiques en temps réel (Membres, Mutés, En attente) qui **s'auto-supprime**.
+- 📊 **Commande `/dashboard`** pour des statistiques en temps réel (Disponibilité, Membres, Mutés, En attente) qui **s'auto-supprime**.
 - 🚀 **Raccourci admin `/deplacer`** : Publie un message (ou un **album complet**) directement vers le bon topic public.
 - 🧹 **Nettoyage automatique** :
   - Tous les messages de service (ex: "X a rejoint le groupe").
@@ -49,16 +49,20 @@
   - 📍 `Radars & Signalements`
   - #️⃣ `Général` (par défaut)
 - ⚙️ **Commande admin `/deplacer`** pour ranger un message (ou un **album complet**) mal placé (gère l'anonymat).
+- 🔒 **Commandes admin `/lock` et `/unlock`** pour verrouiller et déverrouiller le chat public, avec messages de confirmation propres.
 - 🔇 **Modération automatique** :
   - **Anti-spam** (supprime les messages trop rapides).
   - **Anti-charabia** (supprime les messages sans signification).
   - **Mute automatique** (restreint les spammeurs du groupe pour 5 min).
-- 🧹 **Nettoyage automatique** des messages de service (changement de photo, etc.).
-- 🤖 **Menu de commandes** `/` affichant les actions admin (`/deplacer`, `/dashboard`, `/cancel`).
+- 🧹 **Nettoyage automatique** :
+  - Messages de service (changement de photo, etc.).
+  - Commandes admin (`/deplacer`, `/dashboard`, etc.) tapées par des non-admins.
+- 🤖 **Menu de commandes** `/` affichant les actions admin.
 
 ### ⚙️ Arrière-plan
 - 🗃️ **Base de données persistante (SQLite)** : Aucune perte de donnée (signalements, mutes, archives) si le bot redémarre.
 - 📂 **Archivage des médias** : Le bot sauvegarde tous les médias (publics et admins) pour permettre le déplacement des albums.
+- ⚡ **Optimisé pour Render** : Utilise la syntaxe moderne de `python-telegram-bot` (v21+), le bon `PORT` et la gestion `ChatPermissions`.
 - ☁️ Hébergement sur **Render** avec système de **keep-alive** (via Flask).
 
 ---
@@ -67,12 +71,12 @@
 
 | Fichier | Description |
 |----------|-------------|
-| `bot.py` | Script principal du bot |
-| `requirements.txt` | Dépendances Python (Telegram, aiosqlite, flask, requests) |
-| `Procfile` | Configuration Render |
+| `bot.py` | Script principal du bot (Version 15) |
+| `requirements.txt` | Dépendances Python (versions épinglées) |
+| `Dockerfile` | Conteneur de déploiement optimisé |
+| `render.yaml` | Fichier de configuration "Infrastructure as Code" pour Render |
 | `README.md` | Documentation du projet (FR) |
 | `README_EN.md` | Documentation du projet (EN) |
-| `assets/banner.png` | Bannière GitHub |
 
 ---
 
