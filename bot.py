@@ -1272,6 +1272,8 @@ def main():
     app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     
     app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+    app.add_handler(CommandHandler("dashboard", handle_dashboard_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+    
     
     # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
     app.add_handler(CommandHandler(
