@@ -133,7 +133,6 @@ async def init_db():
                     PRIMARY KEY (report_id, message_id)
                 )
             """)
-            # NOUVEAU : Table pour stocker l'état (ex: ID du message "lock")
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS bot_state (
                     key TEXT PRIMARY KEY,
@@ -223,25 +222,17 @@ async def admin_outbox_track(report_id: str, message_ids: list[int]):
     except Exception as e:
         print(f"[ADMIN OUTBOX TRACK] {e}")
 
-# NOUVEAU : Outil pour vérifier les admins (avec cache)
+# Outil pour vérifier les admins (avec cache)
 async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
-    """Vérifie si un user_id est admin, en gérant l'anonymat et un cache."""
-    
-    # 1. Gérer l'anonymat
     if user_id in [1087968824, 136817688]:
         return True
-        
-    # 2. Vérifier le cache
     cache_key = f"admin_cache_{chat_id}"
-    cache_duration = 300 # 5 minutes
+    cache_duration = 300
     now = _now()
-    
     if cache_key in context.bot_data:
         admin_ids, timestamp = context.bot_data[cache_key]
         if now - timestamp < cache_duration:
             return user_id in admin_ids
-
-    # 3. Si cache expiré ou inexistant, appeler l'API
     try:
         admins_list = await context.bot.get_chat_administrators(chat_id)
         admin_ids = {admin.user.id for admin in admins_list}
@@ -249,7 +240,7 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
         return user_id in admin_ids
     except Exception as e:
         print(f"[IS_USER_ADMIN] Erreur API: {e}")
-        return False # En cas d'erreur, refuser
+        return False
 
 # =========================
 # HANDLER MESSAGES USER
@@ -329,14 +320,24 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
+                    # ******** CORRECTION CRITIQUE ICI ********
                     await context.bot.restrict_chat_member(
                         chat_id=PUBLIC_GROUP_ID,
                         user_id=user.id,
                         permissions=ChatPermissions(
                             can_send_messages=False,
-                            can_send_media_messages=False,
-                            can_send_other_messages=False,
-                            can_add_web_page_previews=False
+                            can_send_audios=False,
+                            can_send_documents=False,
+                            can_send_photos=False,
+                            can_send_videos=False,
+                            can_send_video_notes=False,
+                            can_send_voice_notes=False,
+                            can_send_polls=False,
+                            can_send_other_messages=False, # ARGUMENT CORRECT pour stickers/jeux/etc.
+                            can_add_web_page_previews=False,
+                            can_invite_users=False,
+                            can_change_info=False,
+                            can_pin_messages=False,
                         ),
                         until_date=until_ts
                     )
@@ -736,7 +737,6 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
         if user_id in [1087968824, 136817688]:
             is_admin_check_passed = True
         else:
-            # NOUVEAU : Utilisation du cache admin
             is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         
         if not is_admin_check_passed:
@@ -1106,6 +1106,129 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False)
 
 # =========================
+# COMMANDES /lock et /unlock
+# =========================
+
+DEFAULT_PERMISSIONS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True, # CORRIGÉ
+    can_add_web_page_previews=True,
+    can_invite_users=True,
+    can_change_info=False,
+    can_pin_messages=False,
+)
+
+LOCK_PERMISSIONS = ChatPermissions(
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_video_notes=False,
+    can_send_voice_notes=False,
+    can_send_polls=False,
+    can_send_other_messages=False, # CORRIGÉ
+    can_add_web_page_previews=False,
+    can_invite_users=False,
+    can_change_info=False,
+    can_pin_messages=False,
+)
+
+async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    
+    if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
+        try:
+            await msg.delete()
+        except Exception: pass
+        return
+
+    try:
+        await context.bot.set_chat_permissions(
+            chat_id=PUBLIC_GROUP_ID,
+            permissions=LOCK_PERMISSIONS
+        )
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.cursor() as c:
+                await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
+                row = await c.fetchone()
+            if row:
+                try:
+                    await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
+                except Exception: pass
+        
+        sent_msg = await context.bot.send_message(
+            chat_id=PUBLIC_GROUP_ID,
+            text="🔒 Le chat a été temporairement verrouillé par un administrateur."
+        )
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)",
+                ("lock_message_id", str(sent_msg.message_id))
+            )
+            await db.commit()
+
+        await msg.delete()
+
+    except Exception as e:
+        print(f"[LOCK] Erreur: {e}")
+        try:
+            m = await msg.reply_text(f"Erreur lors du verrouillage: {e}")
+            asyncio.create_task(delete_after_delay([msg, m], 10))
+        except Exception: pass
+
+
+async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    
+    if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
+        try:
+            await msg.delete()
+        except Exception: pass
+        return
+
+    try:
+        await context.bot.set_chat_permissions(
+            chat_id=PUBLIC_GROUP_ID,
+            permissions=DEFAULT_PERMISSIONS
+        )
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.cursor() as c:
+                await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
+                row = await c.fetchone()
+            if row:
+                try:
+                    await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
+                except Exception: pass
+            
+            await db.execute("DELETE FROM bot_state WHERE key = 'lock_message_id'")
+            await db.commit()
+
+        sent_msg = await context.bot.send_message(
+            chat_id=PUBLIC_GROUP_ID,
+            text="🔓 Le chat est déverrouillé."
+        )
+        
+        await msg.delete()
+        asyncio.create_task(delete_after_delay([sent_msg], 5))
+
+    except Exception as e:
+        print(f"[UNLOCK] Erreur: {e}")
+        try:
+            m = await msg.reply_text(f"Erreur lors du déverrouillage: {e}")
+            asyncio.create_task(delete_after_delay([msg, m], 10))
+        except Exception: pass
+
+# =========================
 # MAIN
 # =========================
 async def _post_init(application: Application):
@@ -1129,6 +1252,10 @@ def main():
     app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
     app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
     app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
+    
+    app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    
     app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
     
     app.add_handler(CallbackQueryHandler(on_button_click))
