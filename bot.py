@@ -1275,9 +1275,9 @@ def main():
     
     # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
     app.add_handler(CommandHandler(
-        ["dashboard", "cancel"], 
+        ["dashboard", "cancel", "deplacer"], # CORRECTION : Ajout de "deplacer"
         handle_public_admin_command_cleanup, 
-        filters=filters.Chat(PUBLIC_GROUP_ID)
+        filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY # CORRECTION : On ne nettoie que si CE N'EST PAS une réponse
     ))
     
     app.add_handler(CallbackQueryHandler(on_button_click))
