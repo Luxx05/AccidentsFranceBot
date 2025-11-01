@@ -1272,7 +1272,6 @@ def main():
     app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     
     app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-    app.add_handler(CommandHandler("dashboard", handle_dashboard_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
     
     
     # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
@@ -1282,10 +1281,55 @@ def main():
         filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY # CORRECTION : On ne nettoie que si CE N'EST PAS une réponse
     ))
     
-    app.add_handler(CallbackQueryHandler(on_button_click))
+    # --- HANDLERS ---
     
+    # --- Groupe Admin ---
+    app.add_handler(CallbackQueryHandler(on_button_click))
+    app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
     app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
+
+    # --- Groupe Public (Commandes Admin) ---
+    app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    
+    # Gère /deplacer EN RÉPONSE (fonction principale, vérifie admin ET supprime si non-admin)
+    app.add_handler(CommandHandler(
+        "deplacer",
+        handle_deplacer_public,
+        filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
+    ))
+    
+    # --- Groupe Public (Nettoyage des commandes tapées par des non-admins) ---
+    
+    # Nettoie /deplacer tapé SEUL
+    app.add_handler(CommandHandler(
+        "deplacer", 
+        handle_public_admin_command_cleanup, 
+        filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
+    ))
+    
+    # Nettoie /dashboard (seul OU en réponse)
+    app.add_handler(CommandHandler(
+        "dashboard", 
+        handle_public_admin_command_cleanup, 
+        filters=filters.Chat(PUBLIC_GROUP_ID)
+    ))
+    
+    # Nettoie /cancel (seul OU en réponse)
+    app.add_handler(CommandHandler(
+        "cancel", 
+        handle_public_admin_command_cleanup, 
+        filters=filters.Chat(PUBLIC_GROUP_ID)
+    ))
+    
+    # --- Handler final (attrape tout le reste) ---
+    app.add_handler(MessageHandler(
+        filters.ALL & ~filters.COMMAND, 
+        handle_user_message
+    ))
+    # --- FIN DES HANDLERS ---
 
     print("🚀 Bot démarré, en écoute…")
     app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
