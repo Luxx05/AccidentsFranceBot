@@ -1111,6 +1111,8 @@ def run_flask():
 # COMMANDES /lock et /unlock
 # =========================
 
+# Les permissions PAR DÉFAUT (pour /unlock)
+# CORRIGÉ : Syntaxe V21+ (corrigé 'can_send_stickers')
 DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_messages=True,
     can_send_audios=True,
@@ -1120,13 +1122,15 @@ DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_video_notes=True,
     can_send_voice_notes=True,
     can_send_polls=True,
-    can_send_stickers=True,
+    can_send_stickers_and_emoji=True, # <-- Correction ici
     can_add_web_page_previews=True,
     can_invite_users=True,
     can_change_info=False,
     can_pin_messages=False,
 )
 
+# Les permissions pour /lock
+# CORRIGÉ : Syntaxe V21+ (corrigé 'can_send_stickers')
 LOCK_PERMISSIONS = ChatPermissions(
     can_send_messages=False,
     can_send_audios=False,
@@ -1136,7 +1140,7 @@ LOCK_PERMISSIONS = ChatPermissions(
     can_send_video_notes=False,
     can_send_voice_notes=False,
     can_send_polls=False,
-    can_send_stickers=False,
+    can_send_stickers_and_emoji=False, # <-- Correction ici
     can_add_web_page_previews=False,
     can_invite_users=False,
     can_change_info=False,
