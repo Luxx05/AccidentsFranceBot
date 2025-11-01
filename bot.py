@@ -320,20 +320,23 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
-                    # ******** CORRECTION CRITIQUE (V15) ********
-                    # Utilisation de la syntaxe V21+ correcte
                     await context.bot.restrict_chat_member(
                         chat_id=PUBLIC_GROUP_ID,
                         user_id=user.id,
                         permissions=ChatPermissions(
                             can_send_messages=False,
-                            can_send_media_messages=False, # <-- CE N'EST PAS LE BUG
+                            can_send_audios=False,
+                            can_send_documents=False,
+                            can_send_photos=False,
+                            can_send_videos=False,
+                            can_send_video_notes=False,
+                            can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_other_messages=False, # <-- C'EST LUI LE BUG
+                            can_send_stickers_and_emoji=False,
                             can_add_web_page_previews=False,
-                            can_change_info=False,
                             can_invite_users=False,
-                            can_pin_messages=False
+                            can_change_info=False,
+                            can_pin_messages=False,
                         ),
                         until_date=until_ts
                     )
@@ -1236,7 +1239,7 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
             await msg.delete()
         except Exception:
             pass
-
+            
 # NOUVEAU : Commande /start (accueil en privé)
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -1267,7 +1270,6 @@ Bonjour ! Je suis le bot officiel de <b>@AccidentsFR</b>.
     except Exception as e:
         print(f"[HANDLE START] Erreur: {e}")
 
-
 # =========================
 # MAIN
 # =========================
@@ -1292,7 +1294,7 @@ def main():
     
     # NOUVEAU : Commande /start (en privé)
     app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
-
+    
     # Commandes Admin (Groupe Admin)
     app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
     app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
