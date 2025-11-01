@@ -333,7 +333,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             can_send_video_notes=False,
                             can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_other_messages=False, # ARGUMENT CORRECT pour stickers/jeux/etc.
+                            can_send_other_messages=False, # CORRIGÉ
                             can_add_web_page_previews=False,
                             can_invite_users=False,
                             can_change_info=False,
@@ -740,6 +740,10 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         
         if not is_admin_check_passed:
+            # CORRIGÉ : Nettoyer la commande si non-admin
+            try:
+                await msg.delete()
+            except Exception: pass
             return
     except Exception as e:
         print(f"[DEPLACER CHECK] {e}")
@@ -864,7 +868,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, report_id = data.split("|", 1)
     chat_id = query.message.chat_id
     
-    # CORRECTION BUG: Connexion unique
+    # CORRIGÉ BUG: Connexion unique
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             # Clean éventuel edit_state concurrent
@@ -1228,6 +1232,16 @@ async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_after_delay([msg, m], 10))
         except Exception: pass
 
+# NOUVEAU : Handler pour nettoyer les commandes admin tapées dans le public
+async def handle_public_admin_command_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Supprime les commandes admin (/dashboard, /cancel) si tapées par un non-admin dans le public."""
+    msg = update.message
+    if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
 # =========================
 # MAIN
 # =========================
@@ -1257,6 +1271,13 @@ def main():
     app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     
     app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+    
+    # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
+    app.add_handler(CommandHandler(
+        ["dashboard", "cancel"], 
+        handle_public_admin_command_cleanup, 
+        filters=filters.Chat(PUBLIC_GROUP_ID)
+    ))
     
     app.add_handler(CallbackQueryHandler(on_button_click))
     
