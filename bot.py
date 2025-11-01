@@ -332,7 +332,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             can_send_video_notes=False,
                             can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_stickers_and_emoji=False,
+                            can_send_stickers_and_emoji=False, 
                             can_add_web_page_previews=False,
                             can_invite_users=False,
                             can_change_info=False,
