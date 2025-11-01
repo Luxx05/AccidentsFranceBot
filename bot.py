@@ -320,6 +320,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
+                    # ******** CORRECTION CRITIQUE (V16) ********
                     await context.bot.restrict_chat_member(
                         chat_id=PUBLIC_GROUP_ID,
                         user_id=user.id,
@@ -332,7 +333,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             can_send_video_notes=False,
                             can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_stickers_and_emoji=False, 
+                            can_send_stickers_and_emoji=False, # Syntaxe V21+
                             can_add_web_page_previews=False,
                             can_invite_users=False,
                             can_change_info=False,
@@ -1239,7 +1240,7 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
             await msg.delete()
         except Exception:
             pass
-            
+
 # NOUVEAU : Commande /start (accueil en privé)
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
