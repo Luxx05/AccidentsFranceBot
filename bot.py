@@ -740,10 +740,11 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         
         if not is_admin_check_passed:
-            # CORRIGÉ : Nettoyer la commande si non-admin
+            # --- NOUVEAU : Début du correctif ---
             try:
-                await msg.delete()
+                await msg.delete() # Supprime la commande du non-admin
             except Exception: pass
+            # --- NOUVEAU : Fin du correctif ---
             return
     except Exception as e:
         print(f"[DEPLACER CHECK] {e}")
