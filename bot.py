@@ -243,20 +243,24 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
         print(f"[IS_USER_ADMIN] Erreur API: {e}")
         return False
 
-# =========================
-# HANDLER MESSAGES USER
-# =========================
+# =========================================================
+# GESTION DU CONTENU UTILISATEUR
+# =========================================================
+
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
 
-    # 1) Nettoyage messages de service
+    # 1. NETTOYAGE DES MESSAGES DE SERVICE
     if (
-        msg.new_chat_members or msg.left_chat_member or msg.new_chat_photo
-        or msg.delete_chat_photo or msg.new_chat_title
+        msg.new_chat_members or
+        msg.left_chat_member or
+        msg.new_chat_photo or
+        msg.delete_chat_photo or
+        msg.new_chat_title
     ):
-        if msg.chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID):
+        if msg.chat_id == PUBLIC_GROUP_ID or msg.chat_id == ADMIN_GROUP_ID:
             try:
                 await msg.delete()
                 return
@@ -264,35 +268,35 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pass
         return
 
-    # 2) Contexte
+    # 2. GESTION DES MESSAGES NORMAUX
     user = msg.from_user
     chat_id = msg.chat_id
     media_group_id = msg.media_group_id
     now_ts = _now()
-
-    # 3) Mute en privé
+    
+    # 3. VÉRIFICATION MUTE (UNIQUEMENT EN PRIVÉ)
     if chat_id == user.id:
         try:
             async with aiosqlite.connect(DB_NAME) as db:
                 async with db.cursor() as cursor:
                     await cursor.execute("SELECT mute_until_ts FROM muted_users WHERE user_id = ?", (user.id,))
                     row = await cursor.fetchone()
+                
                 if row:
                     mute_until_ts = row[0]
                     now = int(now_ts)
+                    
                     if now < mute_until_ts:
                         remaining_min = (mute_until_ts - now) // 60 + 1
-                        await msg.reply_text(
-                            f"❌ Vous avez été restreint d'envoyer des signalements pour spam.\nTemps restant : {remaining_min} minutes."
-                        )
+                        await msg.reply_text(f"❌ Vous avez été restreint d'envoyer des signalements pour spam.\nTemps restant : {remaining_min} minutes.")
                         return
                     else:
                         await db.execute("DELETE FROM muted_users WHERE user_id = ?", (user.id,))
                         await db.commit()
         except Exception as e:
-            print(f"[CHECK MUTE] {e}")
-
-    # 4) Anti-spam groupe public
+            print(f"[ERREUR CHECK MUTE] {e}")
+    
+    # 4. LOGIQUE DU GROUPE PUBLIC (ANTI-SPAM)
     is_spam = False
     if chat_id == PUBLIC_GROUP_ID:
         text_raw = (msg.text or msg.caption or "").strip()
@@ -306,6 +310,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             ratio = consonnes / (voyelles + 1)
             if ratio > 5:
                 gibberish = True
+        
         is_spam = flood or gibberish
         if is_spam:
             try:
@@ -321,14 +326,24 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
+                    # CORRIGÉ : Utilisation de la syntaxe V21+ (la même que pour /lock)
                     await context.bot.restrict_chat_member(
-                        chat_id=PUBLIC_GROUP_ID,
+                        chat_id=PUBLIC_GROUP_ID, 
                         user_id=user.id,
                         permissions=ChatPermissions(
                             can_send_messages=False,
-                            can_send_media_messages=False,
-                            can_send_other_messages=False,
-                            can_add_web_page_previews=False
+                            can_send_audios=False,
+                            can_send_documents=False,
+                            can_send_photos=False,
+                            can_send_videos=False,
+                            can_send_video_notes=False,
+                            can_send_voice_notes=False,
+                            can_send_polls=False,
+                            can_send_stickers=False,
+                            can_add_web_page_previews=False,
+                            can_invite_users=False,
+                            can_change_info=False,
+                            can_pin_messages=False,
                         ),
                         until_date=until_ts
                     )
@@ -342,35 +357,36 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     print(f"[ANTISPAM] admin notify fail: {e}")
             return
-
-    # 5) Archivage médias (admin + public)
-    if (chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID)) and (msg.photo or msg.video):
-        if not is_spam:
+    
+    # 5. ARCHIVAGE DES MÉDIAS (Admin + Public)
+    if (chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID) and (msg.photo or msg.video):
+        if not is_spam: 
             media_type = "video" if msg.video else "photo"
             file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
             caption = msg.caption or ""
+            
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     await db.execute(
                         """
-                        INSERT OR REPLACE INTO media_archive
-                        (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp)
+                        INSERT OR REPLACE INTO media_archive 
+                        (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp) 
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (msg.message_id, chat_id, media_group_id, file_id, media_type, caption, int(now_ts))
                     )
                     await db.commit()
             except Exception as e:
-                print(f"[ARCHIVE DB] {e}")
-        return
+                print(f"[ARCHIVAGE DB] Erreur: {e}")
+        return 
 
-    # 6) Ignorer texte non-commande dans les groupes
+    # 6. IGNORER LES MESSAGES TEXTE (non-commandes) DES GROUPES
     if chat_id == PUBLIC_GROUP_ID:
         return
     if chat_id == ADMIN_GROUP_ID:
         return
 
-    # 7) Traitement privé (soumissions)
+    # 7. TRAITEMENT DES MESSAGES PRIVÉS (SOUMISSIONS)
     if _is_spam(user.id, media_group_id):
         try:
             await msg.reply_text("⏳ Doucement, envoie pas tout d'un coup 🙏")
@@ -434,42 +450,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     album["ts"] = _now()
     asyncio.create_task(finalize_album_later(media_group_id, context))
 
-async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(0.5)
-    album = TEMP_ALBUMS.get(media_group_id)
-    if album is None or album["done"]:
-        return
-    album["done"] = True
-    report_id = f"{album['chat_id']}_{media_group_id}"
-    ALREADY_FORWARDED_ALBUMS.add(report_id)
-    files_list = album["files"]
-    files_json = json.dumps(files_list)
-    report_text = album["text"]
-    created_ts = int(_now())
-    user_name = album["user_name"]
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
-                (report_id, report_text, files_json, created_ts, user_name)
-            )
-            await db.commit()
-    except Exception as e:
-        print(f"[DB INSERT ALBUM] {e}")
-        return
-    await REVIEW_QUEUE.put({
-        "report_id": report_id,
-        "preview_text": _make_admin_preview(user_name, report_text, is_album=True),
-        "files": files_list,
-    })
-    try:
-        await context.bot.send_message(
-            chat_id=album["chat_id"],
-            text="✅ Reçu (album). Vérif avant publication."
-        )
-    except Exception:
-        pass
-    TEMP_ALBUMS.pop(media_group_id, None)
 
 # =========================
 # ADMIN
