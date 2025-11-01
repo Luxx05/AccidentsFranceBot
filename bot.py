@@ -739,7 +739,6 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         
         if not is_admin_check_passed:
-            # CORRIGÉ : Supprimer la commande du non-admin
             try:
                 await msg.delete()
             except Exception: pass
@@ -1241,6 +1240,38 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
         except Exception:
             pass
 
+# NOUVEAU : Commande /start (accueil en privé)
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    
+    # Message d'accueil (avec formatage HTML pour le gras)
+    welcome_text = """
+Bonjour ! Je suis le bot officiel de <b>@AccidentsFR</b>.
+
+🤫 <b>Toutes vos soumissions ici sont 100% ANONYMES.</b>
+
+---
+
+<b>Comment ça marche ?</b>
+
+1.  Envoyez-moi simplement vos photos, vidéos, ou infos (radars, accidents, contrôles).
+
+2.  N'oubliez pas d'ajouter un petit texte pour le <b>contexte</b> (ex: "Radar mobile A7, sortie Montélimar" ou "Dashcam accident N104").
+
+3.  Un admin validera votre signalement.
+
+4.  Il sera ensuite <b>publié instantanément</b> dans le bon topic du groupe @AccidentsFR (📍 Radars ou 🎥 Vidéos).
+
+---
+À vous de jouer !
+"""
+    
+    try:
+        await msg.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"[HANDLE START] Erreur: {e}")
+
+
 # =========================
 # MAIN
 # =========================
@@ -1262,67 +1293,49 @@ def main():
            .build())
 
     # --- HANDLERS ---
-    app.add_handler(CallbackQueryHandler(on_button_click))
     
-    app.add_handler(CommandHandler(
-        "cancel",
-        handle_admin_cancel,
-        filters=filters.Chat(ADMIN_GROUP_ID)
-    ))
+    # NOUVEAU : Commande /start (en privé)
+    app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
+
+    # Commandes Admin (Groupe Admin)
+    app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
     
-    app.add_handler(CommandHandler(
-        "dashboard",
-        handle_dashboard,
-        filters=filters.Chat(ADMIN_GROUP_ID)
-    ))
-    
-    app.add_handler(CommandHandler(
-        "deplacer",
-        handle_deplacer_admin,
-        filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY
-    ))
-    
-    app.add_handler(CommandHandler(
-        "lock",
-        handle_lock,
-        filters=filters.Chat(PUBLIC_GROUP_ID)
-    ))
-    app.add_handler(CommandHandler(
-        "unlock",
-        handle_unlock,
-        filters=filters.Chat(PUBLIC_GROUP_ID)
-    ))
-    
+    # Commandes Admin (Groupe Public)
+    app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     app.add_handler(CommandHandler(
         "deplacer",
         handle_deplacer_public,
         filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
     ))
     
-    # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
+    # Nettoyage commandes admin (Groupe Public)
     app.add_handler(CommandHandler(
         ["dashboard", "cancel"], 
         handle_public_admin_command_cleanup, 
         filters=filters.Chat(PUBLIC_GROUP_ID)
     ))
-    # (le /deplacer non-admin est déjà géré dans la fonction handle_deplacer_public)
-    
-    app.add_handler(MessageHandler(
-        filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, 
-        handle_admin_edit
+    app.add_handler(CommandHandler(
+        "deplacer", 
+        handle_public_admin_command_cleanup, 
+        filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
     ))
     
-    app.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND, 
-        handle_user_message
-    ))
+    # Callbacks (Boutons)
+    app.add_handler(CallbackQueryHandler(on_button_click))
+    
+    # Messages texte (admin)
+    app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
+    
+    # Handler "attrape-tout"
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
+    
     # --- FIN DES HANDLERS ---
 
     print("🚀 Bot démarré, en écoute…")
-    app.run_polling(
-        poll_interval=POLL_INTERVAL,
-        timeout=POLL_TIMEOUT,
-    )
+    app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
 
 if __name__ == "__main__":
     main()
