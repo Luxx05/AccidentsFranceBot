@@ -243,6 +243,25 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
         return False
 
 # =========================
+# HANDLER /start (MP)
+# =========================
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envoie le message d’accueil en MP quand l’utilisateur clique ‘Démarrer’ (/start)."""
+    welcome = (
+        "Bonjour ! Je suis le bot officiel de @AccidentFr\n"
+        "🤫 Toutes vos soumissions ici sont 100% ANONYMES\n\n"
+        "—-\n\n"
+        "Comment ça marche ?\n"
+        "1. Envoyez moi simplement vos photo , vidéos ou infos ( radars, accident, contrôles).\n"
+        "2. N’oubliez pas d’ajouter un petite texte pour le contexte (ex : « radar mobile A7, sortie Montelimar » ou « Dashcam accident N104 »).\n"
+        "4. Il sera ensuite publié instantanément dans le bon topic du groupe @AccidentsFR (📍Radars ou 🎥 Vidéos)"
+    )
+    try:
+        await update.message.reply_text(welcome)
+    except Exception as e:
+        print(f"[START] Erreur envoi message: {e}")
+
+# =========================
 # HANDLER MESSAGES USER
 # =========================
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1262,6 +1281,9 @@ def main():
            .token(BOT_TOKEN)
            .post_init(_post_init)
            .build())
+
+    # /start uniquement en MP
+    app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
     # Ordre: Commandes > Callbacks > Messages
     app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
