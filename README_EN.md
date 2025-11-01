@@ -37,7 +37,7 @@
 - 🧩 **Manual moderation** by administrators before publication.
 - ✏️ **"Edit" button** to rewrite a post's caption (supports admin anonymity and **auto-cleans** after use).
 - 🔇 **"Reject & Mute 1h" button** to reject a submission and mute the author for 1 hour.
-- 📊 **`/dashboard` command** for real-time stats (Members, Muted, Pending) which **auto-deletes**.
+- 📊 **`/dashboard` command** for real-time stats (Uptime, Members, Muted, Pending) which **auto-deletes**.
 - 🚀 **Admin shortcut `/deplacer`**: Post a message (or a **full album**) directly to the correct public topic.
 - 🧹 **Automatic cleanup**:
   - All service messages (e.g., "X joined the group").
@@ -49,16 +49,20 @@
   - 📍 `Radars & Signalements`
   - #️⃣ `Général` (default)
 - ⚙️ **Admin command `/deplacer`** to move a misplaced message (or a **full album**) to the correct topic (supports anonymity).
+- 🔒 **Admin commands `/lock` and `/unlock`** to lock and unlock the public chat, with clean status messages.
 - 🔇 **Automatic moderation**:
   - **Anti-spam** (deletes messages sent too quickly).
   - **Anti-gibberish** (deletes meaningless messages).
   - **Auto-mute** (restricts group spammers for 5 minutes).
-- 🧹 **Automatic cleanup** of service messages (group photo changes, etc.).
-- 🤖 **Command menu** `/` displaying admin actions (`/deplacer`, `/dashboard`, `/cancel`).
+- 🧹 **Automatic cleanup**:
+  - Service messages (group photo changes, etc.).
+  - Admin commands (`/deplacer`, `/dashboard`, etc.) used by non-admins.
+- 🤖 **Command menu** `/` displaying admin actions.
 
 ### ⚙️ Backend
 - 🗃️ **Persistent Database (SQLite)**: No data loss (submissions, mutes, archives) if the bot restarts.
 - 📂 **Media Archiving**: The bot archives all media (public and admin) to enable moving full albums.
+- ⚡ **Render Optimized**: Uses modern `python-telegram-bot` (v21+), `PORT` variable, and `ChatPermissions` syntax.
 - ☁️ Hosted on **Render** with a **keep-alive** system (via Flask).
 
 ---
@@ -67,12 +71,12 @@
 
 | File | Description |
 |----------|-------------|
-| `bot.py` | Main bot script |
-| `requirements.txt` | Python dependencies (Telegram, aiosqlite, flask, requests) |
-| `Procfile` | Render configuration |
+| `bot.py` | Main bot script (Version 15) |
+| `requirements.txt` | Python dependencies (pinned versions) |
+| `Dockerfile` | Optimized deployment container |
+| `render.yaml` | "Infrastructure as Code" config file for Render |
 | `README.md` | Project documentation (FR) |
 | `README_EN.md` | Project documentation (EN) |
-| `assets/banner.png` | GitHub banner |
 
 ---
 
