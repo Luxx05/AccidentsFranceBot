@@ -248,19 +248,20 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envoie le message d’accueil en MP quand l’utilisateur clique ‘Démarrer’ (/start)."""
     welcome = (
-        "Bonjour ! Je suis le bot officiel de @AccidentFr\n"
-        "🤫 Toutes vos soumissions ici sont 100% ANONYMES\n\n"
-        "—-\n\n"
-        "Comment ça marche ?\n"
-        "1. Envoyez moi simplement vos photo , vidéos ou infos ( radars, accident, contrôles).\n"
-        "2. N’oubliez pas d’ajouter un petite texte pour le contexte (ex : « radar mobile A7, sortie Montelimar » ou « Dashcam accident N104 »).\n"
-        "4. Il sera ensuite publié instantanément dans le bon topic du groupe @AccidentsFR (📍Radars ou 🎥 Vidéos)"
+        "Bonjour ! Je suis le bot officiel de @AccidentsFR.\n\n"
+        "🤫 Toutes vos soumissions ici sont 100% ANONYMES.\n\n"
+        "Comment ça marche ?\n\n"
+        "Envoyez-moi simplement vos photos, vidéos, ou infos (radars, accidents, contrôles).\n\n"
+        "N'oubliez pas d'ajouter un petit texte pour le contexte (ex: \"Radar mobile A7, sortie Montélimar\" ou \"Dashcam accident N104\").\n\n"
+        "Un admin validera votre signalement.\n\n"
+        "Il sera ensuite publié instantanément dans le bon topic du groupe @AccidentsFR (📍 Radars ou 🎥 Vidéos)."
     )
     try:
         await update.message.reply_text(welcome)
     except Exception as e:
         print(f"[START] Erreur envoi message: {e}")
-
+        
+        
 # =========================
 # HANDLER MESSAGES USER
 # =========================
