@@ -126,6 +126,7 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS idx_media_group_id
                 ON media_archive (media_group_id, chat_id);
             """)
+            # Trace des messages postés dans ADMIN (pour purge lors d’édition)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS admin_outbox (
                     report_id TEXT,
@@ -133,7 +134,7 @@ async def init_db():
                     PRIMARY KEY (report_id, message_id)
                 )
             """)
-            # NOUVEAU : Table pour le /lock
+            # Table pour le /lock
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS bot_state (
                     key TEXT PRIMARY KEY,
@@ -243,24 +244,20 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
         print(f"[IS_USER_ADMIN] Erreur API: {e}")
         return False
 
-# =========================================================
-# GESTION DU CONTENU UTILISATEUR
-# =========================================================
-
+# =========================
+# HANDLER MESSAGES USER
+# =========================
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
 
-    # 1. NETTOYAGE DES MESSAGES DE SERVICE
+    # 1) Nettoyage messages de service
     if (
-        msg.new_chat_members or
-        msg.left_chat_member or
-        msg.new_chat_photo or
-        msg.delete_chat_photo or
-        msg.new_chat_title
+        msg.new_chat_members or msg.left_chat_member or msg.new_chat_photo
+        or msg.delete_chat_photo or msg.new_chat_title
     ):
-        if msg.chat_id == PUBLIC_GROUP_ID or msg.chat_id == ADMIN_GROUP_ID:
+        if msg.chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID):
             try:
                 await msg.delete()
                 return
@@ -268,35 +265,35 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pass
         return
 
-    # 2. GESTION DES MESSAGES NORMAUX
+    # 2) Contexte
     user = msg.from_user
     chat_id = msg.chat_id
     media_group_id = msg.media_group_id
     now_ts = _now()
-    
-    # 3. VÉRIFICATION MUTE (UNIQUEMENT EN PRIVÉ)
+
+    # 3) Mute en privé
     if chat_id == user.id:
         try:
             async with aiosqlite.connect(DB_NAME) as db:
                 async with db.cursor() as cursor:
                     await cursor.execute("SELECT mute_until_ts FROM muted_users WHERE user_id = ?", (user.id,))
                     row = await cursor.fetchone()
-                
                 if row:
                     mute_until_ts = row[0]
                     now = int(now_ts)
-                    
                     if now < mute_until_ts:
                         remaining_min = (mute_until_ts - now) // 60 + 1
-                        await msg.reply_text(f"❌ Vous avez été restreint d'envoyer des signalements pour spam.\nTemps restant : {remaining_min} minutes.")
+                        await msg.reply_text(
+                            f"❌ Vous avez été restreint d'envoyer des signalements pour spam.\nTemps restant : {remaining_min} minutes."
+                        )
                         return
                     else:
                         await db.execute("DELETE FROM muted_users WHERE user_id = ?", (user.id,))
                         await db.commit()
         except Exception as e:
-            print(f"[ERREUR CHECK MUTE] {e}")
-    
-    # 4. LOGIQUE DU GROUPE PUBLIC (ANTI-SPAM)
+            print(f"[CHECK MUTE] {e}")
+
+    # 4) Anti-spam groupe public
     is_spam = False
     if chat_id == PUBLIC_GROUP_ID:
         text_raw = (msg.text or msg.caption or "").strip()
@@ -310,7 +307,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             ratio = consonnes / (voyelles + 1)
             if ratio > 5:
                 gibberish = True
-        
         is_spam = flood or gibberish
         if is_spam:
             try:
@@ -328,7 +324,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 try:
                     # CORRIGÉ : Utilisation de la syntaxe V21+ (la même que pour /lock)
                     await context.bot.restrict_chat_member(
-                        chat_id=PUBLIC_GROUP_ID, 
+                        chat_id=PUBLIC_GROUP_ID,
                         user_id=user.id,
                         permissions=ChatPermissions(
                             can_send_messages=False,
@@ -357,36 +353,35 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except Exception as e:
                     print(f"[ANTISPAM] admin notify fail: {e}")
             return
-    
-    # 5. ARCHIVAGE DES MÉDIAS (Admin + Public)
-    if (chat_id == PUBLIC_GROUP_ID or chat_id == ADMIN_GROUP_ID) and (msg.photo or msg.video):
-        if not is_spam: 
+
+    # 5) Archivage médias (admin + public)
+    if (chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID)) and (msg.photo or msg.video):
+        if not is_spam:
             media_type = "video" if msg.video else "photo"
             file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
             caption = msg.caption or ""
-            
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     await db.execute(
                         """
-                        INSERT OR REPLACE INTO media_archive 
-                        (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp) 
+                        INSERT OR REPLACE INTO media_archive
+                        (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (msg.message_id, chat_id, media_group_id, file_id, media_type, caption, int(now_ts))
                     )
                     await db.commit()
             except Exception as e:
-                print(f"[ARCHIVAGE DB] Erreur: {e}")
-        return 
+                print(f"[ARCHIVE DB] {e}")
+        return
 
-    # 6. IGNORER LES MESSAGES TEXTE (non-commandes) DES GROUPES
+    # 6) Ignorer texte non-commande dans les groupes
     if chat_id == PUBLIC_GROUP_ID:
         return
     if chat_id == ADMIN_GROUP_ID:
         return
 
-    # 7. TRAITEMENT DES MESSAGES PRIVÉS (SOUMISSIONS)
+    # 7) Traitement privé (soumissions)
     if _is_spam(user.id, media_group_id):
         try:
             await msg.reply_text("⏳ Doucement, envoie pas tout d'un coup 🙏")
@@ -450,6 +445,42 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     album["ts"] = _now()
     asyncio.create_task(finalize_album_later(media_group_id, context))
 
+async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE):
+    await asyncio.sleep(0.5)
+    album = TEMP_ALBUMS.get(media_group_id)
+    if album is None or album["done"]:
+        return
+    album["done"] = True
+    report_id = f"{album['chat_id']}_{media_group_id}"
+    ALREADY_FORWARDED_ALBUMS.add(report_id)
+    files_list = album["files"]
+    files_json = json.dumps(files_list)
+    report_text = album["text"]
+    created_ts = int(_now())
+    user_name = album["user_name"]
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
+                (report_id, report_text, files_json, created_ts, user_name)
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"[DB INSERT ALBUM] {e}")
+        return
+    await REVIEW_QUEUE.put({
+        "report_id": report_id,
+        "preview_text": _make_admin_preview(user_name, report_text, is_album=True),
+        "files": files_list,
+    })
+    try:
+        await context.bot.send_message(
+            chat_id=album["chat_id"],
+            text="✅ Reçu (album). Vérif avant publication."
+        )
+    except Exception:
+        pass
+    TEMP_ALBUMS.pop(media_group_id, None)
 
 # =========================
 # ADMIN
@@ -1077,11 +1108,9 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False)
 
 # =========================
-# NOUVEAU : COMMANDES /lock et /unlock
+# COMMANDES /lock et /unlock
 # =========================
 
-# Les permissions PAR DÉFAUT (pour /unlock)
-# CORRIGÉ : Syntaxe V21+
 DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_messages=True,
     can_send_audios=True,
@@ -1098,8 +1127,6 @@ DEFAULT_PERMISSIONS = ChatPermissions(
     can_pin_messages=False,
 )
 
-# Les permissions pour /lock
-# CORRIGÉ : Syntaxe V21+
 LOCK_PERMISSIONS = ChatPermissions(
     can_send_messages=False,
     can_send_audios=False,
@@ -1119,21 +1146,18 @@ LOCK_PERMISSIONS = ChatPermissions(
 async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     
-    # 1. Vérifier si c'est un admin
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
-            await msg.delete() # Supprime la commande si non-admin
+            await msg.delete()
         except Exception: pass
         return
 
-    # 2. Appliquer les permissions
     try:
         await context.bot.set_chat_permissions(
             chat_id=PUBLIC_GROUP_ID,
             permissions=LOCK_PERMISSIONS
         )
         
-        # 3. Supprimer l'ancien message de "lock" s'il existe
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as c:
                 await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
@@ -1143,7 +1167,6 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
                 except Exception: pass
         
-        # 4. Envoyer le nouveau message et le sauvegarder
         sent_msg = await context.bot.send_message(
             chat_id=PUBLIC_GROUP_ID,
             text="🔒 Le chat a été temporairement verrouillé par un administrateur."
@@ -1155,7 +1178,6 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await db.commit()
 
-        # 5. Nettoyer la commande
         await msg.delete()
 
     except Exception as e:
@@ -1169,21 +1191,18 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     
-    # 1. Vérifier si c'est un admin
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
             await msg.delete()
         except Exception: pass
         return
 
-    # 2. Rétablir les permissions
     try:
         await context.bot.set_chat_permissions(
             chat_id=PUBLIC_GROUP_ID,
             permissions=DEFAULT_PERMISSIONS
         )
         
-        # 3. Supprimer l'ancien message de "lock"
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as c:
                 await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
@@ -1193,17 +1212,14 @@ async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
                 except Exception: pass
             
-            # Nettoyer la BDD
             await db.execute("DELETE FROM bot_state WHERE key = 'lock_message_id'")
             await db.commit()
 
-        # 4. Envoyer confirmation temporaire
         sent_msg = await context.bot.send_message(
             chat_id=PUBLIC_GROUP_ID,
             text="🔓 Le chat est déverrouillé."
         )
         
-        # 5. Nettoyer la commande et la confirmation
         await msg.delete()
         asyncio.create_task(delete_after_delay([sent_msg], 5))
 
@@ -1239,7 +1255,6 @@ def main():
     app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
     app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
     
-    # NOUVEAU : Commandes de verrouillage (Groupe Public)
     app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     
