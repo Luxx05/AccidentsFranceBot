@@ -333,7 +333,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             can_send_video_notes=False,
                             can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_stickers_and_emoji=False, # Syntaxe V21+
+                            can_send_other_messages=False, # ARGUMENT CORRECT pour stickers/jeux/etc.
                             can_add_web_page_previews=False,
                             can_invite_users=False,
                             can_change_info=False,
@@ -740,13 +740,9 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         
         if not is_admin_check_passed:
-            # NOUVEAU : Supprimer la commande du non-admin
-            try:
-                await msg.delete()
-            except Exception: pass
             return
     except Exception as e:
-        print(f"[DEPLACACER CHECK] {e}")
+        print(f"[DEPLACER CHECK] {e}")
         return
 
     original_msg = msg.reply_to_message
@@ -868,7 +864,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, report_id = data.split("|", 1)
     chat_id = query.message.chat_id
     
-    # CORRIGÉ BUG: Connexion unique
+    # CORRECTION BUG: Connexion unique
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             # Clean éventuel edit_state concurrent
@@ -1122,7 +1118,7 @@ DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_video_notes=True,
     can_send_voice_notes=True,
     can_send_polls=True,
-    can_send_stickers_and_emoji=True,
+    can_send_other_messages=True, # CORRIGÉ
     can_add_web_page_previews=True,
     can_invite_users=True,
     can_change_info=False,
@@ -1138,7 +1134,7 @@ LOCK_PERMISSIONS = ChatPermissions(
     can_send_video_notes=False,
     can_send_voice_notes=False,
     can_send_polls=False,
-    can_send_stickers_and_emoji=False,
+    can_send_other_messages=False, # CORRIGÉ
     can_add_web_page_previews=False,
     can_invite_users=False,
     can_change_info=False,
@@ -1261,13 +1257,6 @@ def main():
     app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
     
     app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-    
-    # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
-    app.add_handler(CommandHandler(
-        ["dashboard", "cancel"], 
-        handle_public_admin_command_cleanup, 
-        filters=filters.Chat(PUBLIC_GROUP_ID)
-    ))
     
     app.add_handler(CallbackQueryHandler(on_button_click))
     
