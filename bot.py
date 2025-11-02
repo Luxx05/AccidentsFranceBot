@@ -526,7 +526,7 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
             )
             await db.commit()
     except Exception as e:
-        print(f"[DB INSERT ALBUM] {e]")
+        print(f"[DB INSERT ALBUM] {e}")
         return
     await REVIEW_QUEUE.put({
         "report_id": report_id,
