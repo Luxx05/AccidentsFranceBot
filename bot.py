@@ -1408,7 +1408,7 @@ def main():
 
             # Si run_polling sort sans exception (stop()): on boucle et relance
             if not HEARTBEAT_ALERT_SENT:
-                _notify_admin_sync("🟠 Bot relancé automatiquement.")
+              _notify_admin_sync("🟠 Bot relancé automatiquement.")
 
         except Exception as e:
             print(f"[MAIN LOOP ERR] {e}")
