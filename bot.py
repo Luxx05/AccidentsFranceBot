@@ -56,6 +56,15 @@ HEARTBEAT_FAILURE_LIMIT = 3
 HEARTBEAT_COOLDOWN_SEC = 300         # 5 min mini entre deux alertes rouges
 _LAST_ALERT_TS = 0                   # timestamp dernière alerte rouge
 HEARTBEAT_ALERT_SENT = False         # True = on a déjà alerté pour cette panne
+IGNORE_ERRORS = (
+    "Event loop is closed",
+    "Task was destroyed but it is pending",
+    "RuntimeWarning: coroutine 'Updater.start_polling' was never awaited",
+)
+_LAST_CRASH_MSG = ""
+_LAST_CRASH_TS = 0
+_BACKOFF_SEC = 2
+_BACKOFF_MAX = 60
 
 accident_keywords = [
     "accident", "accrochage", "carambolage", "choc", "collision",
@@ -1297,37 +1306,8 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
 # =========================
 # MAIN + AUTO-RESTART (anti-spam notifs)
 # =========================
-async def _post_init(application: Application):
-    """Démarré quand l'app est prête."""
-    global HEARTBEAT_ALERT_SENT
-    try:
-        await init_db()
-        asyncio.create_task(worker_loop(application))
-        asyncio.create_task(cleaner_loop())
-        asyncio.create_task(heartbeat_loop(application))  # Watchdog
-        # Reset du flag d'alerte (nouvelle session saine)
-        HEARTBEAT_ALERT_SENT = False
-        try:
-            await application.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text="🟢 Bot relancé (polling activé)."
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"[POST_INIT] {e}")
-
-def _notify_admin_sync(text: str):
-    """Envoi direct via HTTP (hors PTB) si l'event loop est down."""
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data = {"chat_id": ADMIN_GROUP_ID, "text": text}
-        requests.post(url, data=data, timeout=5)
-    except Exception as e:
-        print(f"[NOTIFY_ADMIN_SYNC ERR] {e}")
-
 def main():
-    global _LAST_ALERT_TS, HEARTBEAT_ALERT_SENT
+    global HEARTBEAT_ALERT_SENT, _LAST_ALERT_TS, _LAST_CRASH_MSG, _LAST_CRASH_TS, _BACKOFF_SEC
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
@@ -1338,66 +1318,56 @@ def main():
                    .post_init(_post_init)
                    .build())
 
-            # /start uniquement en MP
+            # ==== Handlers (inchangés) ====
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
-
-            # Ordre: Commandes > Callbacks > Messages
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
-
             app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-
-            # Nettoyage commandes admin tapées par erreur
-            app.add_handler(CommandHandler(
-                ["dashboard", "cancel", "deplacer"],
-                handle_public_admin_command_cleanup,
-                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
-            ))
-
-            # --- Handlers ---
-            # Groupe Admin
+            app.add_handler(CommandHandler(["dashboard","cancel","deplacer"], handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
             app.add_handler(CallbackQueryHandler(on_button_click))
-            app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
             app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
-
-            # Groupe Public (Commandes Admin + déplacement)
-            app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-
-            # Dédoublonnage: commandes non-réponse
             app.add_handler(CommandHandler("deplacer", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
             app.add_handler(CommandHandler("dashboard", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("cancel", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
-
-            # Handler final (tout le reste)
             app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
+            # ==============================
 
             print("🚀 Bot démarré, en écoute…")
             app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
 
-            # Si run_polling sort (stop() par watchdog): notifier une fois la relance auto
+            # == run_polling vient de s'arrêter (watchdog/stop normal) ==
             if HEARTBEAT_ALERT_SENT:
                 _notify_admin_sync("🟠 Bot relancé automatiquement.")
-                HEARTBEAT_ALERT_SENT = False
-                _LAST_ALERT_TS = int(time.time())
+            HEARTBEAT_ALERT_SENT = False
+            _LAST_CRASH_MSG = ""
+            _BACKOFF_SEC = 2
+            _LAST_ALERT_TS = int(time.time())
 
         except Exception as e:
-            print(f"[MAIN LOOP ERR] {e}")
-            # Throttle des alertes rouges "crash détecté"
+            err = str(e) if e else ""
             now = int(time.time())
-            if (now - _LAST_ALERT_TS) >= HEARTBEAT_COOLDOWN_SEC and not HEARTBEAT_ALERT_SENT:
-                _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
-                _LAST_ALERT_TS = now
-                HEARTBEAT_ALERT_SENT = True
-            time.sleep(2)
+            print(f"[MAIN LOOP ERR] {err}")
+
+            # Bruit à ignorer + anti-dup
+            is_benign = any(sig in err for sig in IGNORE_ERRORS)
+            is_duplicate = (err == _LAST_CRASH_MSG) and ((now - _LAST_CRASH_TS) < 120)
+
+            if (not is_benign) and (not is_duplicate):
+                if (now - _LAST_ALERT_TS) >= HEARTBEAT_COOLDOWN_SEC and not HEARTBEAT_ALERT_SENT:
+                    _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{err}")
+                    _LAST_ALERT_TS = now
+                    _LAST_CRASH_MSG = err
+                    _LAST_CRASH_TS = now
+                    HEARTBEAT_ALERT_SENT = True
+
+            # Backoff exponentiel pour calmer la boucle
+            time.sleep(_BACKOFF_SEC)
+            _BACKOFF_SEC = min(_BACKOFF_SEC * 2, _BACKOFF_MAX)
             continue
+
 
 if __name__ == "__main__":
     main()
