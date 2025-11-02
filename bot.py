@@ -37,6 +37,9 @@ MUTE_DURATION_SEC = 300
 MUTE_DURATION_SPAM_SUBMISSION = 3600  # 1h
 
 HEARTBEAT_ALERT_SENT = False
+HEARTBEAT_COOLDOWN_SEC = 300  # 5 min
+HEARTBEAT_ALERT_SENT = False
+_LAST_ALERT_TS = 0
 
 CLEAN_MAX_AGE_PENDING = 3600 * 24
 CLEAN_MAX_AGE_ALBUMS = 60
@@ -267,21 +270,19 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # WATCHDOG / HEARTBEAT
 # =========================
 async def heartbeat_loop(application: Application):
-    global HEARTBEAT_ALERT_SENT
     failures = 0
-
+    global HEARTBEAT_ALERT_SENT, _LAST_ALERT_TS
     while True:
         await asyncio.sleep(45)
         try:
             await application.bot.get_me()
             failures = 0
-            HEARTBEAT_ALERT_SENT = False  # reset si tout est ok
         except Exception as e:
             failures += 1
             print(f"[HEARTBEAT] échec {failures}/3 : {e}")
-
             if failures >= 3:
-                if not HEARTBEAT_ALERT_SENT:
+                now = int(time.time())
+                if not HEARTBEAT_ALERT_SENT and (now - _LAST_ALERT_TS) > HEARTBEAT_COOLDOWN_SEC:
                     try:
                         await application.bot.send_message(
                             chat_id=ADMIN_GROUP_ID,
@@ -289,8 +290,8 @@ async def heartbeat_loop(application: Application):
                         )
                     except Exception:
                         pass
-                    HEARTBEAT_ALERT_SENT = True  # empêche les spams
-
+                    HEARTBEAT_ALERT_SENT = True
+                    _LAST_ALERT_TS = now
                 try:
                     await application.stop()
                 except Exception:
@@ -1404,12 +1405,14 @@ def main():
             ))
 
             print("🚀 Bot démarré, en écoute…")
-            app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
+app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
 
-            # Si run_polling sort sans exception (stop()): on boucle et relance
-            if not HEARTBEAT_ALERT_SENT:
-              _notify_admin_sync("🟠 Bot relancé automatiquement.")
+# Si run_polling sort proprement (watchdog a fait stop()), on signale UN relaunch
 
+global HEARTBEAT_ALERT_SENT
+if HEARTBEAT_ALERT_SENT:
+    _notify_admin_sync("🟠 Bot relancé automatiquement.")
+    HEARTBEAT_ALERT_SENT = False
         except Exception as e:
             print(f"[MAIN LOOP ERR] {e}")
             _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
