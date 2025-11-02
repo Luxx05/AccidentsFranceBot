@@ -1296,121 +1296,93 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
             pass
 
 # =========================
-# MAIN + AUTO-RESTART
+# SUPERVISEUR & MAIN (Option B)
 # =========================
-async def _post_init(application: Application):
-    try:
-        await init_db()
-        asyncio.create_task(worker_loop(application))
-        asyncio.create_task(cleaner_loop())
-        asyncio.create_task(heartbeat_loop(application))  # <= Watchdog 45s
-        # Annonce de relance (au moment où l'app est prête)
-        try:
-            await application.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text="🟢 Bot relancé (polling activé)."
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"[POST_INIT] {e}")
+from telegram import Update as _Update  # pour allowed_updates
 
-def _notify_admin_sync(text: str):
-    """
-    Notifie l'admin via l'API HTTP directe (hors PTB) pour être sûr d'envoyer
-    même si l'event loop est down.
-    """
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data = {"chat_id": ADMIN_GROUP_ID, "text": text}
-        requests.post(url, data=data, timeout=5)
-    except Exception as e:
-        print(f"[NOTIFY_ADMIN_SYNC ERR] {e}")
+_STARTED_SIDE_THREADS = False
 
-def main():
+def start_side_threads_once():
+    """Démarre Flask + keep-alive une seule fois par process."""
+    global _STARTED_SIDE_THREADS
+    if _STARTED_SIDE_THREADS:
+        return
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
+    _STARTED_SIDE_THREADS = True
 
+def run_bot_once():
+    """Construit une NOUVELLE Application et lance le polling (une session)."""
+    app = (ApplicationBuilder()
+           .token(BOT_TOKEN)
+           .post_init(_post_init)
+           .build())
+
+    # Handlers (identiques à ta version actuelle)
+    app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
+
+    app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
+
+    app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+
+    app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+
+    app.add_handler(CommandHandler(["dashboard", "cancel", "deplacer"],
+                                  handle_public_admin_command_cleanup,
+                                  filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
+
+    app.add_handler(CallbackQueryHandler(on_button_click))
+    app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
+    app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
+    app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
+
+    app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+
+    app.add_handler(CommandHandler("deplacer", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
+    app.add_handler(CommandHandler("dashboard", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
+    app.add_handler(CommandHandler("cancel", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
+
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
+
+    print("🚀 Bot démarré, en écoute…")
+    # Bloquant ; retourne si stop/crash
+    app.run_polling(
+        poll_interval=POLL_INTERVAL,
+        timeout=POLL_TIMEOUT,
+        allowed_updates=_Update.ALL_TYPES,
+    )
+
+def main():
+    """Boucle superviseur avec backoff + alertes admin, sans casser l'event loop."""
+    start_side_threads_once()
+    backoff = 5  # secondes, max 300
     while True:
         try:
-            app = (ApplicationBuilder()
-                   .token(BOT_TOKEN)
-                   .post_init(_post_init)
-                   .build())
-
-            # /start uniquement en MP
-            app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
-
-            # Ordre: Commandes > Callbacks > Messages
-            app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
-            
-            app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-            
-            # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
-            app.add_handler(CommandHandler(
-                ["dashboard", "cancel", "deplacer"], # CORRECTION : Ajout de "deplacer"
-                handle_public_admin_command_cleanup, 
-                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY # CORRECTION : On ne nettoie que si CE N'EST PAS une réponse
-            ))
-            
-            # --- HANDLERS ---
-            # --- Groupe Admin ---
-            app.add_handler(CallbackQueryHandler(on_button_click))
-            app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
-            app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
-
-            # --- Groupe Public (Commandes Admin) ---
-            app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            
-            # Gère /deplacer EN RÉPONSE
-            app.add_handler(CommandHandler(
-                "deplacer",
-                handle_deplacer_public,
-                filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
-            ))
-            
-            # --- Groupe Public (Nettoyage des commandes tapées par des non-admins) ---
-            app.add_handler(CommandHandler(
-                "deplacer", 
-                handle_public_admin_command_cleanup, 
-                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
-            ))
-            app.add_handler(CommandHandler(
-                "dashboard", 
-                handle_public_admin_command_cleanup, 
-                filters=filters.Chat(PUBLIC_GROUP_ID)
-            ))
-            app.add_handler(CommandHandler(
-                "cancel", 
-                handle_public_admin_command_cleanup, 
-                filters=filters.Chat(PUBLIC_GROUP_ID)
-            ))
-            
-            # --- Handler final (attrape tout le reste) ---
-            app.add_handler(MessageHandler(
-                filters.ALL & ~filters.COMMAND, 
-                handle_user_message
-            ))
-
-            print("🚀 Bot démarré, en écoute…")
-            app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
-
-            # Si run_polling sort sans exception (stop()): on boucle et relance
-            _notify_admin_sync("🟠 Bot redémarre (watchdog).")
-
+            run_bot_once()  # retourne si stop/crash
+            backoff = 5
+            print("ℹ️ Polling terminé proprement. Redémarrage…")
         except Exception as e:
             print(f"[MAIN LOOP ERR] {e}")
-            _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
-            time.sleep(2)
-            continue
-
-if __name__ == "__main__":
-    main()
+            # Alerte admin
+            try:
+                from telegram import Bot
+                Bot(BOT_TOKEN).send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"⚠️ Bot crash: {e}\n↻ Redémarrage dans {backoff}s."
+                )
+            except Exception:
+                pass
+            # Petit ping Render pour garder le pod chaud
+            try:
+                requests.get(KEEP_ALIVE_URL, timeout=3)
+            except Exception:
+                pass
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+            # boucle → nouvelle Application propre
