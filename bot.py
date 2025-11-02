@@ -304,6 +304,11 @@ async def heartbeat_loop(application: Application):
                 except Exception:
                     pass
                 break
+                try:
+                    await application.shutdown()
+                except Exception:
+                    pass
+                break
 
 # =========================
 # HANDLER MESSAGES USER
@@ -1343,7 +1348,15 @@ def main():
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
+    backoff = RESTART_MIN_SLEEP_SEC
+
     while True:
+        # petite pause avant chaque relance pour laisser l’ancienne connexion se fermer côté TG
+        try:
+            time.sleep(backoff)
+        except Exception:
+            pass
+
         try:
             app = (ApplicationBuilder()
                    .token(BOT_TOKEN)
@@ -1363,33 +1376,29 @@ def main():
 
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
 
-            # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
+            # Nettoyage commandes non-admin dans le public
             app.add_handler(CommandHandler(
                 ["dashboard", "cancel", "deplacer"],
                 handle_public_admin_command_cleanup,
                 filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
             ))
 
-            # --- HANDLERS ---
-            # --- Groupe Admin ---
+            # --- HANDLERS (identiques à ta base) ---
             app.add_handler(CallbackQueryHandler(on_button_click))
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
             app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
 
-            # --- Groupe Public (Commandes Admin) ---
             app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
 
-            # Gère /deplacer EN RÉPONSE
             app.add_handler(CommandHandler(
                 "deplacer",
                 handle_deplacer_public,
                 filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
             ))
 
-            # --- Groupe Public (Nettoyage des commandes tapées par des non-admins) ---
             app.add_handler(CommandHandler(
                 "deplacer",
                 handle_public_admin_command_cleanup,
@@ -1406,23 +1415,30 @@ def main():
                 filters=filters.Chat(PUBLIC_GROUP_ID)
             ))
 
-            # --- Handler final (attrape tout le reste) ---
             app.add_handler(MessageHandler(
                 filters.ALL & ~filters.COMMAND,
                 handle_user_message
             ))
 
             print("🚀 Bot démarré, en écoute…")
+            # run_polling est bloquant; s'il sort suite au watchdog, on revient en haut avec une petite pause
             app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
 
-            # Si run_polling sort sans exception (stop()): on boucle et relance
+            # sortie "propre" (watchdog) -> notif unique, puis backoff réinitialisé
             _notify_admin_sync("🟠 Bot redémarre (watchdog).")
+            backoff = RESTART_MIN_SLEEP_SEC
 
         except Exception as e:
-            print(f"[MAIN LOOP ERR] {e}")
-            _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
-            time.sleep(2)
+            err = str(e)
+            print(f"[MAIN LOOP ERR] {err}")
+            # on notifie uniquement si ce n’est pas le bruit « Event loop is closed »
+            if "Event loop is closed" not in err:
+                _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{err}")
+            # backoff exponentiel pour éviter le spam/les conflits getUpdates
+            backoff = min(RESTART_BACKOFF_MAX_SEC, max(RESTART_MIN_SLEEP_SEC, backoff * 2))
+            
             continue
+
 
 if __name__ == "__main__":
     main()
