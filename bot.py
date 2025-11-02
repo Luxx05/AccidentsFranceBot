@@ -48,27 +48,29 @@ PUBLIC_TOPIC_VIDEOS_ID = 224
 PUBLIC_TOPIC_RADARS_ID = 222
 PUBLIC_TOPIC_GENERAL_ID = None
 
-# =========================
-# WATCHDOG / ANTI-SPAM ALERTS (nouveau)
-# =========================
-HEARTBEAT_INTERVAL = 45                 # s
-HEARTBEAT_FAILURE_LIMIT = 3
-HEARTBEAT_COOLDOWN_SEC = 300            # 5 min mini entre deux alertes
-_LAST_ALERT_TS = 0                      # timestamp dernière alerte
-HEARTBEAT_ALERT_SENT = False            # True = on a déjà alerté pour ce cycle
-
-# Filtre des messages d'erreur “bruit” qu’on ne notifie pas
-IGNORE_ERRORS = (
-    "Event loop is closed",
-    "Task was destroyed but it is pending",
-    "coroutine 'Updater.start_polling' was never awaited",
-)
-
-# Anti-spam crash notifs + backoff
-_LAST_CRASH_MSG = ""
-_LAST_CRASH_TS = 0
-_BACKOFF_SEC = 2
-_BACKOFF_MAX = 60
+accident_keywords = [
+    "accident", "accrochage", "carambolage", "choc", "collision",
+    "crash", "sortie de route", "perte de contrôle", "perdu le contrôle",
+    "sorti de la route", "accidenté", "accident grave", "accident mortel",
+    "accident léger", "accident autoroute", "accident route", "accident nationale",
+    "accident voiture", "accident moto", "accident camion", "accident poids lourd",
+    "voiture accidentée", "camion couché", "camion renversé", "choc frontal",
+    "tête à queue", "dashcam", "dash cam", "dash-cam", "caméra embarquée",
+    "vidéo accident", "impact", "sorti de la chaussée", "frotter", "accrochage léger",
+    "freinage d'urgence", "a percuté", "percuté", "collision arrière",
+    "route coupée", "bouchon accident", "accident en direct"
+]
+radar_keywords = [
+    "radar", "radar mobile", "radar fixe", "radar flash", "radar de chantier",
+    "radar tourelle", "radar embarqué", "radar double sens", "radar chantier",
+    "contrôle", "controle", "contrôle routier", "contrôle radar", "contrôle police",
+    "contrôle gendarmerie", "contrôle laser", "contrôle mobile",
+    "flash", "flashé", "flasher", "laser", "jumelle", "jumelles",
+    "police", "gendarmerie", "camion radar", "voiture radar", "banalisée",
+    "voiture banalisée", "voiture de police", "véhicule radar", "véhicule banalisé",
+    "camion banalisé", "radar caché", "radar planqué", "piège", "contrôle alcootest",
+    "alcoolémie", "radar mobile nouvelle génération", "radar en travaux"
+]
 
 # =========================
 # ÉTAT EN MÉMOIRE
@@ -181,7 +183,7 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
 async def delete_after_delay(messages: list, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
     for msg in messages:
-        if not msg:
+        if not msg: 
             continue
         try:
             await msg.delete()
@@ -244,11 +246,15 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
 # HANDLER /start (MP)
 # =========================
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envoie le message d’accueil en MP quand l’utilisateur clique ‘Démarrer’ (/start)."""
     welcome = (
         "Bonjour ! Je suis le bot officiel de @AccidentsFR.\n\n"
         "🤫 Toutes vos soumissions ici sont 100% ANONYMES.\n\n"
-        "Envoyez vos photos, vidéos ou infos (radars, accidents, contrôles) + un petit contexte.\n"
-        "Un admin valide et je publie dans le bon topic du groupe @AccidentsFR."
+        "Comment ça marche ?\n\n"
+        "Envoyez-moi simplement vos photos, vidéos, ou infos (radars, accidents, contrôles).\n\n"
+        "N'oubliez pas d'ajouter un petit texte pour le contexte (ex: \"Radar mobile A7, sortie Montélimar\" ou \"Dashcam accident N104\").\n\n"
+        "Un admin validera votre signalement.\n\n"
+        "Il sera ensuite publié instantanément dans le bon topic du groupe @AccidentsFR (📍 Radars ou 🎥 Vidéos)."
     )
     try:
         await update.message.reply_text(welcome)
@@ -260,32 +266,28 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def heartbeat_loop(application: Application):
     """
-    Ping Telegram toutes les HEARTBEAT_INTERVAL secondes.
-    Après HEARTBEAT_FAILURE_LIMIT échecs consécutifs, on notifie (avec cooldown),
-    on marque HEARTBEAT_ALERT_SENT=True puis on stop() l'app pour que main() relance.
+    Ping Telegram toutes les 45s. Si 3 échecs consécutifs, on prévient (si possible),
+    puis on stop() l'app pour déclencher le redémarrage dans la boucle main().
     """
-    global HEARTBEAT_ALERT_SENT, _LAST_ALERT_TS
     failures = 0
     while True:
-        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        await asyncio.sleep(45)
         try:
             await application.bot.get_me()
             failures = 0
         except Exception as e:
             failures += 1
-            print(f"[HEARTBEAT] échec {failures}/{HEARTBEAT_FAILURE_LIMIT} : {e}")
-            if failures >= HEARTBEAT_FAILURE_LIMIT:
-                now = int(_now())
-                if now - _LAST_ALERT_TS >= HEARTBEAT_COOLDOWN_SEC and not HEARTBEAT_ALERT_SENT:
-                    try:
-                        await application.bot.send_message(
-                            chat_id=ADMIN_GROUP_ID,
-                            text="🔴 Connexion Telegram perdue. Redémarrage automatique…"
-                        )
-                        _LAST_ALERT_TS = now
-                        HEARTBEAT_ALERT_SENT = True
-                    except Exception:
-                        pass
+            print(f"[HEARTBEAT] échec {failures}/3 : {e}")
+            if failures >= 3:
+                # Tenter d'alerter dans l'admin avant stop
+                try:
+                    await application.bot.send_message(
+                        chat_id=ADMIN_GROUP_ID,
+                        text="🔴 Connexion Telegram perdue. Redémarrage automatique…"
+                    )
+                except Exception:
+                    pass
+                # Stop polling => la boucle main() relancera
                 try:
                     await application.stop()
                 except Exception:
@@ -336,9 +338,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         )
                         return
                     else:
-                        async with aiosqlite.connect(DB_NAME) as db2:
-                            await db2.execute("DELETE FROM muted_users WHERE user_id = ?", (user.id,))
-                            await db2.commit()
+                        await db.execute("DELETE FROM muted_users WHERE user_id = ?", (user.id,))
+                        await db.commit()
         except Exception as e:
             print(f"[CHECK MUTE] {e}")
 
@@ -371,6 +372,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 SPAM_COUNT[user.id] = {"count": 0, "last": now_ts}
                 until_ts = int(now_ts + MUTE_DURATION_SEC)
                 try:
+                    # ******** CORRECTION CRITIQUE ICI ********
                     await context.bot.restrict_chat_member(
                         chat_id=PUBLIC_GROUP_ID,
                         user_id=user.id,
@@ -383,7 +385,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             can_send_video_notes=False,
                             can_send_voice_notes=False,
                             can_send_polls=False,
-                            can_send_other_messages=False,
+                            can_send_other_messages=False, # CORRIGÉ
                             can_add_web_page_previews=False,
                             can_invite_users=False,
                             can_change_info=False,
@@ -790,9 +792,11 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         
         if not is_admin_check_passed:
+            # --- NOUVEAU : Début du correctif ---
             try:
-                await msg.delete()
+                await msg.delete() # Supprime la commande du non-admin
             except Exception: pass
+            # --- NOUVEAU : Fin du correctif ---
             return
     except Exception as e:
         print(f"[DEPLACER CHECK] {e}")
@@ -917,14 +921,17 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, report_id = data.split("|", 1)
     chat_id = query.message.chat_id
     
+    # CORRIGÉ BUG: Connexion unique
     try:
         async with aiosqlite.connect(DB_NAME) as db:
+            # Clean éventuel edit_state concurrent
             try:
                 await db.execute("DELETE FROM edit_state WHERE chat_id = ?", (chat_id,))
                 await db.commit()
             except Exception as e:
                 print(f"[BTN CLEAN EDIT_STATE] {e}")
 
+            # 1. Lire les infos
             async with db.cursor() as c:
                 await c.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
                 row = await c.fetchone()
@@ -942,6 +949,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "user_name": row[2]
             }
 
+            # --- REJECT ---
             if action == "REJECT":
                 m = await context.bot.send_message(ADMIN_GROUP_ID, "❌ Supprimé, non publié.")
                 asyncio.create_task(delete_after_delay([m], 5))
@@ -950,6 +958,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await admin_outbox_delete(report_id, context.bot)
                 return
 
+            # --- REJECT & MUTE ---
             if action == "REJECTMUTE":
                 user_id = None
                 try:
@@ -983,6 +992,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await admin_outbox_delete(report_id, context.bot)
                 return
 
+            # --- EDIT (prompt) ---
             if action == "EDIT":
                 current_text = info.get("text", "")
                 try:
@@ -1006,6 +1016,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     asyncio.create_task(delete_after_delay([m], 8))
                 return
 
+            # --- APPROVE ---
             if action == "APPROVE":
                 files = info["files"]
                 text = (info["text"] or "").strip()
@@ -1112,7 +1123,7 @@ async def cleaner_loop():
                 if int(now) % 3600 == 0:
                     await db.execute("DELETE FROM edit_state")
                     await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),))
-                    await db.execute("DELETE FROM admin_outbox")
+                    await db.execute("DELETE FROM admin_outbox") # Purge de sécurité
                 await db.commit()
 
             cutoff_ts_spam = now - CLEAN_MAX_AGE_SPAM
@@ -1154,6 +1165,7 @@ def run_flask():
 # =========================
 # COMMANDES /lock et /unlock
 # =========================
+
 DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_messages=True,
     can_send_audios=True,
@@ -1163,7 +1175,7 @@ DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_video_notes=True,
     can_send_voice_notes=True,
     can_send_polls=True,
-    can_send_other_messages=True,
+    can_send_other_messages=True, # CORRIGÉ
     can_add_web_page_previews=True,
     can_invite_users=True,
     can_change_info=False,
@@ -1179,7 +1191,7 @@ LOCK_PERMISSIONS = ChatPermissions(
     can_send_video_notes=False,
     can_send_voice_notes=False,
     can_send_polls=False,
-    can_send_other_messages=False,
+    can_send_other_messages=False, # CORRIGÉ
     can_add_web_page_previews=False,
     can_invite_users=False,
     can_change_info=False,
@@ -1188,12 +1200,19 @@ LOCK_PERMISSIONS = ChatPermissions(
 
 async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
-        try: await msg.delete()
+        try:
+            await msg.delete()
         except Exception: pass
         return
+
     try:
-        await context.bot.set_chat_permissions(chat_id=PUBLIC_GROUP_ID, permissions=LOCK_PERMISSIONS)
+        await context.bot.set_chat_permissions(
+            chat_id=PUBLIC_GROUP_ID,
+            permissions=LOCK_PERMISSIONS
+        )
+        
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as c:
                 await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
@@ -1202,11 +1221,20 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
                 except Exception: pass
-        sent_msg = await context.bot.send_message(chat_id=PUBLIC_GROUP_ID, text="🔒 Le chat a été temporairement verrouillé par un administrateur.")
+        
+        sent_msg = await context.bot.send_message(
+            chat_id=PUBLIC_GROUP_ID,
+            text="🔒 Le chat a été temporairement verrouillé par un administrateur."
+        )
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", ("lock_message_id", str(sent_msg.message_id)))
+            await db.execute(
+                "INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)",
+                ("lock_message_id", str(sent_msg.message_id))
+            )
             await db.commit()
+
         await msg.delete()
+
     except Exception as e:
         print(f"[LOCK] Erreur: {e}")
         try:
@@ -1214,14 +1242,22 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_after_delay([msg, m], 10))
         except Exception: pass
 
+
 async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
-        try: await msg.delete()
+        try:
+            await msg.delete()
         except Exception: pass
         return
+
     try:
-        await context.bot.set_chat_permissions(chat_id=PUBLIC_GROUP_ID, permissions=DEFAULT_PERMISSIONS)
+        await context.bot.set_chat_permissions(
+            chat_id=PUBLIC_GROUP_ID,
+            permissions=DEFAULT_PERMISSIONS
+        )
+        
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as c:
                 await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
@@ -1230,11 +1266,18 @@ async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
                 except Exception: pass
+            
             await db.execute("DELETE FROM bot_state WHERE key = 'lock_message_id'")
             await db.commit()
-        sent_msg = await context.bot.send_message(chat_id=PUBLIC_GROUP_ID, text="🔓 Le chat est déverrouillé.")
+
+        sent_msg = await context.bot.send_message(
+            chat_id=PUBLIC_GROUP_ID,
+            text="🔓 Le chat est déverrouillé."
+        )
+        
         await msg.delete()
         asyncio.create_task(delete_after_delay([sent_msg], 5))
+
     except Exception as e:
         print(f"[UNLOCK] Erreur: {e}")
         try:
@@ -1242,8 +1285,9 @@ async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_after_delay([msg, m], 10))
         except Exception: pass
 
-# NOUVEAU : Handler de nettoyage des commandes admin tapées par des non-admins
+# NOUVEAU : Handler pour nettoyer les commandes admin tapées dans le public
 async def handle_public_admin_command_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Supprime les commandes admin (/dashboard, /cancel) si tapées par un non-admin dans le public."""
     msg = update.message
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
@@ -1252,14 +1296,15 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
             pass
 
 # =========================
-# POST-INIT + NOTIFY SYNC
+# MAIN + AUTO-RESTART
 # =========================
 async def _post_init(application: Application):
     try:
         await init_db()
         asyncio.create_task(worker_loop(application))
         asyncio.create_task(cleaner_loop())
-        asyncio.create_task(heartbeat_loop(application))  # <= Watchdog
+        asyncio.create_task(heartbeat_loop(application))  # <= Watchdog 45s
+        # Annonce de relance (au moment où l'app est prête)
         try:
             await application.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
@@ -1271,21 +1316,18 @@ async def _post_init(application: Application):
         print(f"[POST_INIT] {e}")
 
 def _notify_admin_sync(text: str):
-    """Notifier l’admin via l’API HTTP Telegram (hors PTB)."""
+    """
+    Notifie l'admin via l'API HTTP directe (hors PTB) pour être sûr d'envoyer
+    même si l'event loop est down.
+    """
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         data = {"chat_id": ADMIN_GROUP_ID, "text": text}
         requests.post(url, data=data, timeout=5)
     except Exception as e:
-        # on avale l'erreur pour ne pas relancer une cascade
         print(f"[NOTIFY_ADMIN_SYNC ERR] {e}")
 
-# =========================
-# MAIN + AUTO-RESTART (anti-spam notifs)
-# =========================
 def main():
-    global HEARTBEAT_ALERT_SENT, _LAST_ALERT_TS, _LAST_CRASH_MSG, _LAST_CRASH_TS, _BACKOFF_SEC
-
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
@@ -1296,96 +1338,79 @@ def main():
                    .post_init(_post_init)
                    .build())
 
-            # ==== Handlers ====
-            # /start en MP
+            # /start uniquement en MP
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
-            # Admin group
+            # Ordre: Commandes > Callbacks > Messages
+            app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
+            app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
+            app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
+            
+            app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+            app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
+            
+            app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+            
+            # NOUVEAU : Handlers pour nettoyer les commandes admin tapées par erreur
+            app.add_handler(CommandHandler(
+                ["dashboard", "cancel", "deplacer"], # CORRECTION : Ajout de "deplacer"
+                handle_public_admin_command_cleanup, 
+                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY # CORRECTION : On ne nettoie que si CE N'EST PAS une réponse
+            ))
+            
+            # --- HANDLERS ---
+            # --- Groupe Admin ---
             app.add_handler(CallbackQueryHandler(on_button_click))
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
             app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
 
-            # Public (commandes admin)
+            # --- Groupe Public (Commandes Admin) ---
             app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-            app.add_handler(CommandHandler(["dashboard", "cancel", "deplacer"], handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
-
-            # Catch-all
-            app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
+            
+            # Gère /deplacer EN RÉPONSE
+            app.add_handler(CommandHandler(
+                "deplacer",
+                handle_deplacer_public,
+                filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
+            ))
+            
+            # --- Groupe Public (Nettoyage des commandes tapées par des non-admins) ---
+            app.add_handler(CommandHandler(
+                "deplacer", 
+                handle_public_admin_command_cleanup, 
+                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
+            ))
+            app.add_handler(CommandHandler(
+                "dashboard", 
+                handle_public_admin_command_cleanup, 
+                filters=filters.Chat(PUBLIC_GROUP_ID)
+            ))
+            app.add_handler(CommandHandler(
+                "cancel", 
+                handle_public_admin_command_cleanup, 
+                filters=filters.Chat(PUBLIC_GROUP_ID)
+            ))
+            
+            # --- Handler final (attrape tout le reste) ---
+            app.add_handler(MessageHandler(
+                filters.ALL & ~filters.COMMAND, 
+                handle_user_message
+            ))
 
             print("🚀 Bot démarré, en écoute…")
             app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
 
-            # run_polling s'arrête (stop() via heartbeat) → relance
-            if not HEARTBEAT_ALERT_SENT:
-                # pas d’alerte déjà envoyée -> petite info unique
-                now = int(_now())
-                if now - _LAST_ALERT_TS >= HEARTBEAT_COOLDOWN_SEC:
-                    _notify_admin_sync("🟠 Bot relancé automatiquement.")
-                    _LAST_ALERT_TS = now
-            # reset flags / backoff après redémarrage OK
-            HEARTBEAT_ALERT_SENT = False
-            _BACKOFF_SEC = 2
-            continue
+            # Si run_polling sort sans exception (stop()): on boucle et relance
+            _notify_admin_sync("🟠 Bot redémarre (watchdog).")
 
         except Exception as e:
-            err_text = str(e) or e.__class__.__name__
-            print(f"[MAIN LOOP ERR] {err_text}")
-
-            # Filtre erreurs bruit
-            if any(sig in err_text for sig in IGNORE_ERRORS):
-                time.sleep(min(_BACKOFF_SEC, _BACKOFF_MAX))
-                _BACKOFF_SEC = min(_BACKOFF_SEC * 2, _BACKOFF_MAX)
-                continue
-
-            # Anti-dup: même message + <10s => pas de spam
-            now = int(_now())
-            if err_text == _LAST_CRASH_MSG and (now - _LAST_CRASH_TS) < 10:
-                time.sleep(min(_BACKOFF_SEC, _BACKOFF_MAX))
-                _BACKOFF_SEC = min(_BACKOFF_SEC * 2, _BACKOFF_MAX)
-                continue
-
-            # Cooldown global d’alerte
-            if now - _LAST_ALERT_TS >= HEARTBEAT_COOLDOWN_SEC:
-                _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{err_text}")
-                _LAST_ALERT_TS = now
-
-            _LAST_CRASH_MSG = err_text
-            _LAST_CRASH_TS = now
-
-            time.sleep(min(_BACKOFF_SEC, _BACKOFF_MAX))
-            _BACKOFF_SEC = min(_BACKOFF_SEC * 2, _BACKOFF_MAX)
+            print(f"[MAIN LOOP ERR] {e}")
+            _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
+            time.sleep(2)
             continue
 
 if __name__ == "__main__":
     main()
-
-# =========================
-# Mots-clés (à la fin pour compacité)
-# =========================
-accident_keywords = [
-    "accident", "accrochage", "carambolage", "choc", "collision",
-    "crash", "sortie de route", "perte de contrôle", "perdu le contrôle",
-    "sorti de la route", "accidenté", "accident grave", "accident mortel",
-    "accident léger", "accident autoroute", "accident route", "accident nationale",
-    "accident voiture", "accident moto", "accident camion", "accident poids lourd",
-    "voiture accidentée", "camion couché", "camion renversé", "choc frontal",
-    "tête à queue", "dashcam", "dash cam", "dash-cam", "caméra embarquée",
-    "vidéo accident", "impact", "sorti de la chaussée", "frotter", "accrochage léger",
-    "freinage d'urgence", "a percuté", "percuté", "collision arrière",
-    "route coupée", "bouchon accident", "accident en direct"
-]
-radar_keywords = [
-    "radar", "radar mobile", "radar fixe", "radar flash", "radar de chantier",
-    "radar tourelle", "radar embarqué", "radar double sens", "radar chantier",
-    "contrôle", "controle", "contrôle routier", "contrôle radar", "contrôle police",
-    "contrôle gendarmerie", "contrôle laser", "contrôle mobile",
-    "flash", "flashé", "flasher", "laser", "jumelle", "jumelles",
-    "police", "gendarmerie", "camion radar", "voiture radar", "banalisée",
-    "voiture banalisée", "voiture de police", "véhicule radar", "véhicule banalisé",
-    "camion banalisé", "radar caché", "radar planqué", "piège", "contrôle alcootest",
-    "alcoolémie", "radar mobile nouvelle génération", "radar en travaux"
-]
