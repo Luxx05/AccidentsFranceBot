@@ -46,6 +46,10 @@ POLL_TIMEOUT = 30
 RESTART_MIN_SLEEP_SEC = 3   # délai minimum avant relance (anti-spam)
 RESTART_MAX_SLEEP_SEC = 60  # délai max si redémarrages en boucle
 
+# Compatibilité avec ancien nom de variable (évite NameError)
+RESTART_BACKOFF_MIN_SEC = RESTART_MIN_SLEEP_SEC
+RESTART_BACKOFF_MAX_SEC = RESTART_MAX_SLEEP_SEC
+
 PUBLIC_TOPIC_VIDEOS_ID = 224
 PUBLIC_TOPIC_RADARS_ID = 222
 PUBLIC_TOPIC_GENERAL_ID = None
