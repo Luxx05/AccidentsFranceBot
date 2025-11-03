@@ -43,6 +43,8 @@ CLEAN_MAX_AGE_ARCHIVE = 3600 * 24 * 3  # 3j
 
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 30
+RESTART_MIN_SLEEP_SEC = 3   # délai minimum avant relance (anti-spam)
+RESTART_MAX_SLEEP_SEC = 60  # délai max si redémarrages en boucle
 
 PUBLIC_TOPIC_VIDEOS_ID = 224
 PUBLIC_TOPIC_RADARS_ID = 222
