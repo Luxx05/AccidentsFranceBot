@@ -1347,28 +1347,22 @@ def _notify_admin_sync(text: str, *, force: bool = False):
         print(f"[NOTIFY_ADMIN_SYNC ERR] {e}")
 
 def main():
+    # Threads annexes inchangés
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    backoff = RESTART_MIN_SLEEP_SEC
+    backoff = 2  # petit retry progressif propre (2s -> 4 -> 8 -> 16 -> 30)
 
     while True:
-        # petite pause avant chaque relance pour laisser l’ancienne connexion se fermer côté TG
-        try:
-            time.sleep(backoff)
-        except Exception:
-            pass
-
         try:
             app = (ApplicationBuilder()
                    .token(BOT_TOKEN)
                    .post_init(_post_init)
                    .build())
 
-            # /start uniquement en MP
+            # ====== Handlers inchangés (laisse exactement ton bloc actuel) ======
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
-            # Ordre: Commandes > Callbacks > Messages
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
@@ -1378,14 +1372,12 @@ def main():
 
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
 
-            # Nettoyage commandes non-admin dans le public
             app.add_handler(CommandHandler(
                 ["dashboard", "cancel", "deplacer"],
                 handle_public_admin_command_cleanup,
                 filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
             ))
 
-            # --- HANDLERS (identiques à ta base) ---
             app.add_handler(CallbackQueryHandler(on_button_click))
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
@@ -1395,52 +1387,36 @@ def main():
             app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
 
-            app.add_handler(CommandHandler(
-                "deplacer",
-                handle_deplacer_public,
-                filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY
-            ))
+            app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+            app.add_handler(CommandHandler("deplacer", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
+            app.add_handler(CommandHandler("dashboard", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
+            app.add_handler(CommandHandler("cancel", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
 
-            app.add_handler(CommandHandler(
-                "deplacer",
-                handle_public_admin_command_cleanup,
-                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
-            ))
-            app.add_handler(CommandHandler(
-                "dashboard",
-                handle_public_admin_command_cleanup,
-                filters=filters.Chat(PUBLIC_GROUP_ID)
-            ))
-            app.add_handler(CommandHandler(
-                "cancel",
-                handle_public_admin_command_cleanup,
-                filters=filters.Chat(PUBLIC_GROUP_ID)
-            ))
-
-            app.add_handler(MessageHandler(
-                filters.ALL & ~filters.COMMAND,
-                handle_user_message
-            ))
+            app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
+            # ====== fin handlers ======
 
             print("🚀 Bot démarré, en écoute…")
-            # run_polling est bloquant; s'il sort suite au watchdog, on revient en haut avec une petite pause
-            app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT)
+            # 🔑 NE PAS fermer la loop à la fin => évite "Event loop is closed"
+            app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT, close_loop=False)
 
-            # sortie "propre" (watchdog) -> notif unique, puis backoff réinitialisé
+            # Si on sort proprement (watchdog stop), on notifie et on repart
             _notify_admin_sync("🟠 Bot redémarre (watchdog).")
-            backoff = RESTART_MIN_SLEEP_SEC
+            backoff = 2  # reset backoff après un run OK
 
         except Exception as e:
-            err = str(e)
-            print(f"[MAIN LOOP ERR] {err}")
-            # on notifie uniquement si ce n’est pas le bruit « Event loop is closed »
-            if "Event loop is closed" not in err:
-                _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{err}")
-            # backoff exponentiel pour éviter le spam/les conflits getUpdates
-            backoff = min(RESTART_BACKOFF_MAX_SEC, max(RESTART_MIN_SLEEP_SEC, backoff * 2))
-            
-            continue
+            print(f"[MAIN LOOP ERR] {e}")
+            _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
+            # 🧼 Recrée une nouvelle event loop saine avant de relancer
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            except Exception:
+                pass
+
+            continue
 
 if __name__ == "__main__":
     main()
