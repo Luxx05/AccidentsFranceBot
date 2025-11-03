@@ -1,0 +1,34 @@
+# Ignorer les fichiers de documentation
+README.md
+LICENSE
+CHANGELOG.md
+*.md
+
+# Ignorer les dossiers de docs / images / exemples
+docs/
+documentation/
+assets/
+images/
+img/
+screenshots/
+extras/
+
+# Ignorer fichiers non liés au bot
+*.txt
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.mov
+
+# Ignorer fichiers IDE / dev perso
+.vscode/
+.idea/
+*.code-workspace
+
+# Ignorer backup/config perso
+*.bak
+*.tmp
+*.log
