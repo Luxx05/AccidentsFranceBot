@@ -60,6 +60,12 @@ HEARTBEAT_ALERT_COOLDOWN_SEC = 300      # 5 min entre 2 alertes "connexion perdu
 _last_admin_notify_ts = 0.0
 _last_heartbeat_alert_ts = 0.0
 
+# --- Link moderation (NOUVEAU) ---
+MUTE_LINKS_DURATION_SEC = 600  # 10 min de mute pour liens non autorisés
+ALLOWED_TG_USERNAMES = {
+    u.strip().lower() for u in os.getenv("ALLOWED_TG_USERNAMES", "AccidentsFR,AccidentsFranceBot").split(",")
+}
+
 accident_keywords = [
     "accident", "accrochage", "carambolage", "choc", "collision",
     "crash", "sortie de route", "perte de contrôle", "perdu le contrôle",
@@ -258,6 +264,77 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔇 Rejeter & Muter 1h", callback_data=f"REJECTMUTE|{report_id}")
         ]
     ])
+
+# ===== Helpers liens (NOUVEAU) =====
+def _extract_entities_text(msg) -> tuple[list, list]:
+    ents = getattr(msg, "entities", []) or []
+    cents = getattr(msg, "caption_entities", []) or []
+    return ents, cents
+
+def _has_disallowed_link(msg) -> bool:
+    """
+    True si le message contient un lien non autorisé :
+    - URL non Telegram -> bloqué
+    - URL Telegram -> bloqué sauf si username autorisé
+    - @mention -> bloquée sauf si username autorisé
+    """
+    text = (msg.caption or msg.text or "")
+    ents, cents = _extract_entities_text(msg)
+    allents = list(ents) + list(cents)
+
+    for e in allents:
+        et = e.type
+        if et in ("url", "text_link"):
+            url = getattr(e, "url", None)
+            if not url and et == "url":
+                try:
+                    url = text[e.offset:e.offset+e.length]
+                except Exception:
+                    url = None
+            if not url:
+                continue
+            u = url.strip().lower()
+
+            if not ("t.me/" in u or "telegram.me/" in u or u.startswith("tg://")):
+                return True  # lien externe
+
+            username = None
+            if "t.me/" in u or "telegram.me/" in u:
+                try:
+                    after = u.split("t.me/")[-1].split("telegram.me/")[-1]
+                except Exception:
+                    after = u
+                after = after.split("?")[0].split("/")[0]
+                username = after.lstrip("@")
+            elif u.startswith("tg://") and "domain=" in u:
+                try:
+                    qs = u.split("domain=", 1)[1]
+                    username = qs.split("&")[0].split("#")[0].split("/")[0]
+                except Exception:
+                    username = None
+
+            if username and username.lower() in ALLOWED_TG_USERNAMES:
+                continue
+            return True  # lien telegram vers autre chose
+
+        elif et == "mention":
+            try:
+                mention = text[e.offset:e.offset+e.length]
+            except Exception:
+                mention = ""
+            username = mention.lstrip("@").lower()
+            if username not in ALLOWED_TG_USERNAMES:
+                return True
+
+    # fallback si pas d'entités mais lien brut
+    t = text.lower()
+    if "http://" in t or "https://" in t or "www." in t or "t.me/" in t or "telegram.me/" in t:
+        for allowed in ALLOWED_TG_USERNAMES:
+            if f"t.me/{allowed.lower()}" in t:
+                return False
+        return True
+
+    return False
 
 async def delete_after_delay(messages: list, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
@@ -500,12 +577,71 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     print(f"[ANTISPAM] admin notify fail: {e}")
             return
 
+    # 4-bis) Modération des liens (PUBLIC) — (NOUVEAU)
+    if chat_id == PUBLIC_GROUP_ID:
+        try:
+            is_admin_user = await is_user_admin(context, PUBLIC_GROUP_ID, user.id)
+        except Exception:
+            is_admin_user = False
+
+        if not is_admin_user and _has_disallowed_link(msg):
+            try:
+                await msg.delete()
+            except Exception as e:
+                print(f"[LINK MOD] delete fail: {e}")
+
+            until_ts = int(_now() + MUTE_LINKS_DURATION_SEC)
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=PUBLIC_GROUP_ID,
+                    user_id=user.id,
+                    permissions=ChatPermissions(
+                        can_send_messages=False,
+                        can_send_audios=False,
+                        can_send_documents=False,
+                        can_send_photos=False,
+                        can_send_videos=False,
+                        can_send_video_notes=False,
+                        can_send_voice_notes=False,
+                        can_send_polls=False,
+                        can_send_other_messages=False,
+                        can_add_web_page_previews=False,
+                        can_invite_users=False,
+                        can_change_info=False,
+                        can_pin_messages=False,
+                    ),
+                    until_date=until_ts
+                )
+            except Exception as e:
+                print(f"[LINK MOD] mute fail: {e}")
+
+            try:
+                mins = MUTE_LINKS_DURATION_SEC // 60
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"🚫 Les liens externes sont interdits ici. Seuls @AccidentsFR et @AccidentsFranceBot sont autorisés.\nMute {mins} min."
+                )
+            except Exception:
+                pass
+
+            try:
+                note = await context.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"🔗 Lien bloqué + mute 10min — user {user.id}"
+                )
+                asyncio.create_task(delete_after_delay([note], 5))
+            except Exception:
+                pass
+
+            return
+
     # 5) Archivage médias (admin + public)
     if (chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID)) and (msg.photo or msg.video):
         if not is_spam:
             media_type = "video" if msg.video else "photo"
             file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
             caption = msg.caption or ""
+            now_ts = _now()
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     await db.execute(
