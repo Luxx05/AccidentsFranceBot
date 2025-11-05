@@ -1093,10 +1093,8 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     media_group_id = original_msg.media_group_id
-    # texte saisi par l’auteur du post public (caption si média, sinon texte)
     base_text = (original_msg.caption or original_msg.text or "").strip()
-    # on prend le texte du message auquel tu réponds en priorité si tu veux corriger la légende à la volée
-    # (ex: tu réponds avec un texte dans /modifier, sinon on garde le texte/caption existant)
+
     override_text = (msg.text or "").replace("/modifier", "").strip()
     final_text = override_text if override_text else base_text
     final_text = final_text or ""  # jamais None
@@ -1106,7 +1104,7 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         message_ids_to_delete = []
 
         if media_group_id:
-            # 3A) ALBUM : on reconstruit l’album complet depuis l’archive publique
+            # ==== ALBUM =====
             async with aiosqlite.connect(DB_NAME) as db:
                 async with db.cursor() as c:
                     await c.execute(
@@ -1121,7 +1119,6 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                     rows = await c.fetchall()
 
             if rows:
-                # si aucun override_text, on récupère la première caption non vide
                 if not override_text:
                     for _, _, _, cap in rows:
                         if cap:
@@ -1135,33 +1132,29 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                     elif file_type == "video":
                         files_list.append({"type": "video", "file_id": file_id})
             else:
-                # album pas trouvé (très vieux ?), on tente fallback avec le message seul
-                print("[MODIFIER] Album non trouvé en archive, fallback sur le message source")
+                print("[MODIFIER] Album non trouvé en archive, fallback message seul")
                 if original_msg.photo:
                     files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
                 elif original_msg.video:
                     files_list.append({"type": "video", "file_id": original_msg.video.file_id})
-                # si c’est un album ancien, on n’a pas tous les éléments : on supprime au moins le message source
                 message_ids_to_delete.append(original_msg.message_id)
 
-            # report id stable basé sur le group id
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
 
         else:
-            # 3B) MESSAGE SIMPLE
+            # ==== MESSAGE SIMPLE ====
             if original_msg.photo:
                 files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
             elif original_msg.video:
                 files_list.append({"type": "video", "file_id": original_msg.video.file_id})
-            # texte seul possible
+
             message_ids_to_delete.append(original_msg.message_id)
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{original_msg.message_id}"
 
-        # 4) créer l’entrée en file d’attente pour le groupe admin (même logique que les MP)
+        # -- Enregistrement en pending & envoi admin
         user = original_msg.from_user
         user_name = f"@{user.username}" if user and user.username else "public"
         created_ts = int(time.time())
-
         files_json = json.dumps(files_list)
 
         async with aiosqlite.connect(DB_NAME) as db:
@@ -1171,18 +1164,18 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             )
             await db.commit()
 
-        preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1))
-        # on pousse dans la queue standard => envoi avec boutons dans le groupe admin
+        # ==== NOTE intégrée dans le bloc admin ====
+        note = "\n\n♻️ <i>Renvoi en modération depuis le groupe public.</i>"
+        preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
+
         await REVIEW_QUEUE.put({
             "report_id": report_id,
             "preview_text": preview_text,
             "files": files_list,
         })
 
-        # 5) supprimer TOUTES les parties du post public (album ou message unique) + la commande
-        #    on essaie d'abord la liste construite depuis l'archive, sinon au moins le message source
+        # ==== Suppression dans le public ====
         if media_group_id and not message_ids_to_delete:
-            # safety: si rien collecté (cas ultra edge), on supprime au moins le message source
             message_ids_to_delete.append(original_msg.message_id)
 
         for mid in set(message_ids_to_delete):
@@ -1191,28 +1184,18 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as e:
                 print(f"[MODIFIER] del public {mid} : {e}")
 
-        # supprimer la commande /modifier
         try:
             await msg.delete()
         except Exception:
             pass
 
-        # petit feedback discret dans le public (auto-delete)
+        # Feedback auto-suppression
         try:
             info = await context.bot.send_message(
                 chat_id=PUBLIC_GROUP_ID,
-                text="♻️ Publication retirée — envoyée en re-modération.",
+                text="♻️ Publication retirée — renvoyée en modération.",
             )
             asyncio.create_task(delete_after_delay([info], 5))
-        except Exception:
-            pass
-
-        # message côté admin (optionnel, déjà préview via REVIEW_QUEUE)
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text="📝 Message renvoyé en modération (depuis le public)."
-            )
         except Exception:
             pass
 
