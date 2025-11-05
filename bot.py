@@ -1165,7 +1165,7 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             await db.commit()
 
         # ==== NOTE intégrée dans le bloc admin ====
-        note = "\n\n♻️ <i>Renvoi en modération depuis le groupe public.</i>"
+        note = "\n\n♻️Renvoi en modération depuis le groupe public."
         preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
 
         await REVIEW_QUEUE.put({
