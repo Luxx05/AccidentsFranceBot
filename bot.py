@@ -54,7 +54,7 @@ PUBLIC_TOPIC_VIDEOS_ID = 224
 PUBLIC_TOPIC_RADARS_ID = 222
 PUBLIC_TOPIC_GENERAL_ID = None
 
-# --- Anti-spam notifications admin (NOUVEAU) ---
+# --- Anti-spam notifications admin ---
 ADMIN_NOTIFY_COOLDOWN_SEC = 300         # 5 min entre 2 notifs "crash/redémarre"
 HEARTBEAT_ALERT_COOLDOWN_SEC = 300      # 5 min entre 2 alertes "connexion perdue"
 _last_admin_notify_ts = 0.0
@@ -151,11 +151,78 @@ async def init_db():
                     value TEXT
                 )
             """)
+            # ======= NOUVEAU : tables statistiques =======
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS stats_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT,           -- 'published','rejected','album_received','spam_blocked','restart','crash'
+                    ts INTEGER,                -- epoch seconds
+                    meta TEXT                  -- JSON optionnel
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS counters (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER
+                )
+            """)
+            # seed counters if missing
+            for k in ("published_total","rejected_total","spam_blocked_total","auto_restarts_total"):
+                await db.execute("INSERT OR IGNORE INTO counters(key,value) VALUES(?,0)", (k,))
             await db.commit()
         print(f"🗃️ DB ok '{DB_NAME}'")
     except Exception as e:
         print(f"[DB INIT ERR] {e}")
         raise
+
+# ======= OUTILS STATS =======
+async def _inc_counter(db, key: str, delta: int = 1):
+    try:
+        await db.execute("INSERT INTO counters(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = value + ?",
+                         (key, delta, delta))
+    except Exception as e:
+        print(f"[COUNTER INC {key}] {e}")
+
+async def _get_counter(db, key: str) -> int:
+    async with db.execute("SELECT value FROM counters WHERE key = ?", (key,)) as cur:
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+async def _add_event(db, event_type: str, meta: dict | None = None, ts: int | None = None):
+    try:
+        await db.execute(
+            "INSERT INTO stats_events(event_type, ts, meta) VALUES(?,?,?)",
+            (event_type, int(ts or time.time()), json.dumps(meta or {}))
+        )
+    except Exception as e:
+        print(f"[ADD EVENT {event_type}] {e}")
+
+async def _count_events(db, event_type: str, since_ts: int) -> int:
+    async with db.execute("SELECT COUNT(*) FROM stats_events WHERE event_type = ? AND ts >= ?", (event_type, since_ts)) as cur:
+        row = await cur.fetchone()
+        return int(row[0] or 0)
+
+async def _busiest_hour_range_last24(db) -> str | None:
+    since = int(time.time()) - 24*3600
+    # on compte par heure locale (0..23)
+    try:
+        async with db.execute("""
+            SELECT strftime('%H', datetime(ts,'unixepoch','localtime')) AS hh, COUNT(*)
+            FROM stats_events
+            WHERE event_type='published' AND ts >= ?
+            GROUP BY hh
+            ORDER BY COUNT(*) DESC
+            LIMIT 1
+        """, (since,)) as cur:
+            row = await cur.fetchone()
+            if not row: return None
+            start_h = int(row[0])
+            end_h = (start_h + 3) % 24
+            # format "19h – 22h"
+            return f"{start_h}h – {end_h}h"
+    except Exception as e:
+        print(f"[BUSIEST HOUR] {e}")
+        return None
 
 # =========================
 # OUTILS
@@ -385,6 +452,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await msg.delete()
             except Exception as e:
                 print(f"[ANTISPAM] delete fail: {e}")
+            # stats: spam_blocked
+            try:
+                async with aiosqlite.connect(DB_NAME) as db:
+                    await _inc_counter(db, "spam_blocked_total", 1)
+                    await _add_event(db, "spam_blocked")
+                    await db.commit()
+            except Exception as e:
+                print(f"[SPAM STATS] {e}")
             if now_ts - user_state["last"] > 10:
                 user_state["count"] = 0
             user_state["count"] += 1
@@ -535,6 +610,8 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
                 "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
                 (report_id, report_text, files_json, created_ts, user_name)
             )
+            # stats : album reçu
+            await _add_event(db, "album_received", {"count": len(files_list)})
             await db.commit()
     except Exception as e:
         print(f"[DB INSERT ALBUM] {e}")
@@ -665,10 +742,14 @@ async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         print(f"[HANDLE ADMIN CANCEL] {e}")
 
+# =========================
+# DASHBOARD FULL STATS
+# =========================
 async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     try:
         async with aiosqlite.connect(DB_NAME) as db:
+            # En attente / mutés / édition
             async with db.cursor() as c:
                 await c.execute("SELECT COUNT(*) FROM pending_reports")
                 pending_count = (await c.fetchone())[0]
@@ -676,32 +757,76 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 muted_count = (await c.fetchone())[0]
                 await c.execute("SELECT COUNT(*) FROM edit_state")
                 edit_count = (await c.fetchone())[0]
+
+            # Totaux publish/reject/spam
+            published_total = await _get_counter(db, "published_total")
+            rejected_total = await _get_counter(db, "rejected_total")
+            spam_total = await _get_counter(db, "spam_blocked_total")
+            auto_restarts_total = await _get_counter(db, "auto_restarts_total")
+
+            # Fenêtre 24h
+            since_24h = int(time.time()) - 24*3600
+            published_24h = await _count_events(db, "published", since_24h)
+            albums_24h = await _count_events(db, "album_received", since_24h)
+            spam_24h = await _count_events(db, "spam_blocked", since_24h)
+            busiest = await _busiest_hour_range_last24(db)
+
+            # Derniers timestamps système
+            async with db.execute("SELECT value FROM bot_state WHERE key='last_restart_ts'") as cur:
+                row = await cur.fetchone()
+                last_restart_ts = int(row[0]) if row else None
+            async with db.execute("SELECT value FROM bot_state WHERE key='last_crash_ts'") as cur:
+                row = await cur.fetchone()
+                last_crash_ts = int(row[0]) if row else None
+
+        # Comptage membres
         member_count = await context.bot.get_chat_member_count(PUBLIC_GROUP_ID)
         member_count = max(0, member_count - 2)
 
+        # Uptime
         uptime_seconds = int(time.time() - START_TIME)
         m, s = divmod(uptime_seconds, 60)
         h, m = divmod(m, 60)
         d, h = divmod(h, 24)
         uptime_str = f"{d}j {h}h {m}m"
-        edit_status = "🟢 Non" if edit_count == 0 else f"🔴 OUI ({edit_count} verrou)"
+        edit_status = "🟢 Non" if edit_count == 0 else "🛑 Oui"
 
-        text = f"""
-📊 <b>Tableau de Bord - AccidentsFR Bot</b>
------------------------------------
-<b>État :</b> 🟢 En ligne
-<b>Disponibilité :</b> {uptime_str} (depuis {time.strftime('%d/%m %H:%M', time.localtime(START_TIME))})
+        # Pourcentages
+        rej_pct = 0.0
+        if published_total + rejected_total > 0:
+            rej_pct = (rejected_total * 100.0) / (published_total + rejected_total)
 
-<b>Modération :</b>
-<b>Signalements en attente :</b> {pending_count}
-<b>Utilisateurs mutés (privé) :</b> {muted_count}
-<b>Édition en cours :</b> {edit_status}
+        # Formats dates
+        def fmt_ts(ts):
+            return time.strftime('%d/%m %H:%M', time.localtime(ts)) if ts else "—"
 
-<b>Activité :</b>
-<b>Membres (Groupe Public) :</b> {member_count}
+        text = (
+f"📊 <b>𝘿𝘼𝙎𝙃𝘽𝙊𝘼𝙍𝘿 — AccidentsFR Bot</b>\n"
+f"─────────────────────────────\n"
+f"🟢 <b>État :</b> En ligne\n"
+f"⏱️ <b>Uptime :</b> {uptime_str}\n"
+f"♻️ <b>Dernier redémarrage auto :</b> {fmt_ts(last_restart_ts)}\n\n"
 
-<i>(Ce message sera supprimé dans 60s)</i>
-"""
+f"📌 <b>Modération</b>\n"
+f"• <b>Signalements en attente :</b> {pending_count}\n"
+f"• <b>Publiés :</b> {published_total}   |   <b>Rejetés :</b> {rejected_total} ({rej_pct:.1f} %)\n"
+f"• <b>Utilisateurs mutés :</b> {muted_count}\n"
+f"• <b>Édition en cours :</b> {edit_status}\n\n"
+
+f"📌 <b>Activité</b>\n"
+f"• <b>Membres (groupe public) :</b> {member_count}\n"
+f"• <b>Signalements validés (24h) :</b> {published_24h}\n"
+f"• <b>Albums reçus (24h) :</b> {albums_24h}\n"
+f"• <b>Heure la + active :</b> {busiest or '—'}\n\n"
+
+f"📌 <b>Système & Sécurité</b>\n"
+f"• <b>Redémarrages automatiques :</b> {auto_restarts_total}\n"
+f"• <b>Dernier crash détecté :</b> {fmt_ts(last_crash_ts)} (auto-recover)\n"
+f"• <b>Anti-spam :</b> {spam_24h} bloqués (24h) / total {spam_total}\n\n"
+
+f"💡 <i>Ce message s’efface dans 60s.</i>"
+        )
+
         sent = await msg.reply_text(text, parse_mode=ParseMode.HTML)
         asyncio.create_task(delete_after_delay([msg, sent], 60))
     except Exception as e:
@@ -791,6 +916,15 @@ async def handle_deplacer_admin(update: Update, context: ContextTypes.DEFAULT_TY
 
         m = await msg.reply_text("✅ Message publié dans le groupe public.")
         asyncio.create_task(delete_after_delay([msg, m], 5))
+
+        # Stat: publication directe depuis admin
+        try:
+            async with aiosqlite.connect(DB_NAME) as db:
+                await _inc_counter(db, "published_total", 1)
+                await _add_event(db, "published", {"source": "admin_move"})
+                await db.commit()
+        except Exception as e:
+            print(f"[PUBLISH STATS (admin move)] {e}")
 
     except Exception as e:
         print(f"[DEPLACER_ADMIN] {e}")
@@ -910,6 +1044,8 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             print(f"[DEPLACER PUBLIC] delete cmd: {e}")
 
+        # (déplacement public ne compte pas une nouvelle publication)
+
     except Exception as e:
         print(f"[DEPLACER PUB] {e}")
         try:
@@ -971,6 +1107,11 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "REJECT":
                 m = await context.bot.send_message(ADMIN_GROUP_ID, "❌ Supprimé, non publié.")
                 asyncio.create_task(delete_after_delay([m], 5))
+
+                # stats: rejet
+                await _inc_counter(db, "rejected_total", 1)
+                await _add_event(db, "rejected", {"report_id": report_id})
+
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
                 await admin_outbox_delete(report_id, context.bot)
@@ -992,6 +1133,11 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "INSERT OR REPLACE INTO muted_users (user_id, mute_until_ts) VALUES (?, ?)",
                     (user_id, mute_until_ts)
                 )
+
+                # stats: rejet
+                await _inc_counter(db, "rejected_total", 1)
+                await _add_event(db, "rejected", {"report_id": report_id, "muted": True})
+
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
 
@@ -1084,6 +1230,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             message_thread_id=target_thread_id
                         )
 
+                    # Notify user (best effort)
                     try:
                         user_chat_id_str, _ = report_id.split("_", 1)
                         user_chat_id = int(user_chat_id_str)
@@ -1093,6 +1240,10 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception as e:
                         print(f"[NOTIFY USER APPROVE] {e}")
+
+                    # stats: publication
+                    await _inc_counter(db, "published_total", 1)
+                    await _add_event(db, "published", {"report_id": report_id})
 
                     await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                     await db.commit()
@@ -1351,7 +1502,7 @@ def _notify_admin_sync(text: str, *, force: bool = False):
         print(f"[NOTIFY_ADMIN_SYNC ERR] {e}")
 
 def main():
-    # Threads annexes inchangés
+    # Threads annexes
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
@@ -1364,7 +1515,7 @@ def main():
                    .post_init(_post_init)
                    .build())
 
-            # ====== Handlers inchangés (laisse exactement ton bloc actuel) ======
+            # ====== Handlers (inchangés + dashboard amélioré) ======
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
@@ -1400,16 +1551,30 @@ def main():
             # ====== fin handlers ======
 
             print("🚀 Bot démarré, en écoute…")
-            # 🔑 NE PAS fermer la loop à la fin => évite "Event loop is closed"
+            # NE PAS fermer la loop à la fin
             app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT, close_loop=False)
 
             # Si on sort proprement (watchdog stop), on notifie et on repart
             _notify_admin_sync("🟠 Bot redémarre (watchdog).")
+
+            # enregistrer un redémarrage
+            try:
+                with asyncio.run_coroutine_threadsafe(_log_restart(), asyncio.get_event_loop()):
+                    pass
+            except Exception:
+                # si la loop n'est pas accessible, on le fera dans la prochaine itération
+                pass
+
             backoff = 2  # reset backoff après un run OK
 
         except Exception as e:
             print(f"[MAIN LOOP ERR] {e}")
             _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
+            # log crash + planifier restart
+            try:
+                asyncio.run(_log_crash_and_plan_restart())
+            except Exception:
+                pass
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
@@ -1421,6 +1586,25 @@ def main():
                 pass
 
             continue
+
+async def _log_restart():
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await _inc_counter(db, "auto_restarts_total", 1)
+            await _add_event(db, "restart")
+            await db.execute("INSERT OR REPLACE INTO bot_state(key,value) VALUES('last_restart_ts',?)", (str(int(time.time())),))
+            await db.commit()
+    except Exception as e:
+        print(f"[LOG RESTART] {e}")
+
+async def _log_crash_and_plan_restart():
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await _add_event(db, "crash")
+            await db.execute("INSERT OR REPLACE INTO bot_state(key,value) VALUES('last_crash_ts',?)", (str(int(time.time())),))
+            await db.commit()
+    except Exception as e:
+        print(f"[LOG CRASH] {e}")
 
 if __name__ == "__main__":
     main()
