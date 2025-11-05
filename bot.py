@@ -806,24 +806,20 @@ f"──────────────────────────
 f"🟢 <b>État :</b> En ligne\n"
 f"⏱️ <b>Uptime :</b> {uptime_str}\n"
 f"♻️ <b>Dernier redémarrage auto :</b> {fmt_ts(last_restart_ts)}\n\n"
-
 f"📌 <b>Modération</b>\n"
 f"• <b>Signalements en attente :</b> {pending_count}\n"
 f"• <b>Publiés :</b> {published_total}   |   <b>Rejetés :</b> {rejected_total} ({rej_pct:.1f} %)\n"
 f"• <b>Utilisateurs mutés :</b> {muted_count}\n"
 f"• <b>Édition en cours :</b> {edit_status}\n\n"
-
 f"📌 <b>Activité</b>\n"
 f"• <b>Membres (groupe public) :</b> {member_count}\n"
 f"• <b>Signalements validés (24h) :</b> {published_24h}\n"
 f"• <b>Albums reçus (24h) :</b> {albums_24h}\n"
 f"• <b>Heure la + active :</b> {busiest or '—'}\n\n"
-
 f"📌 <b>Système & Sécurité</b>\n"
 f"• <b>Redémarrages automatiques :</b> {auto_restarts_total}\n"
 f"• <b>Dernier crash détecté :</b> {fmt_ts(last_crash_ts)} (auto-recover)\n"
 f"• <b>Anti-spam :</b> {spam_24h} bloqués (24h) / total {spam_total}\n\n"
-
 f"💡 <i>Ce message s’efface dans 60s.</i>"
         )
 
@@ -1063,6 +1059,116 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             else:
                 m = await msg.reply_text(f"Erreur déplacement : {e}")
                 asyncio.create_task(delete_after_delay([m, msg], 8))
+        except Exception:
+            pass
+
+# =========================
+# /MODIFIER (PUBLIC -> admin, re-modération)
+# =========================
+async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    try:
+        user_id = msg.from_user.id
+        is_admin_check_passed = False
+        if user_id in [1087968824, 136817688]:
+            is_admin_check_passed = True
+        else:
+            is_admin_check_passed = await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
+
+        if not is_admin_check_passed:
+            try:
+                await msg.delete()  # supprime la commande d'un non-admin
+            except Exception:
+                pass
+            return
+    except Exception as e:
+        print(f"[MODIFIER CHECK] {e}")
+        return
+
+    original = msg.reply_to_message
+    if not original:
+        try:
+            m = await msg.reply_text("Usage : répondez à un message avec /modifier pour le renvoyer en modération.")
+            asyncio.create_task(delete_after_delay([msg, m], 6))
+        except Exception:
+            pass
+        return
+
+    # Récup contenu
+    media_group_id = original.media_group_id
+    text_src = (original.text or original.caption or "").strip()
+    files_list = []
+
+    try:
+        if media_group_id:
+            # On récupère l'album depuis l'archive publique
+            async with aiosqlite.connect(DB_NAME) as db:
+                async with db.cursor() as c:
+                    await c.execute(
+                        "SELECT file_type, file_id FROM media_archive WHERE media_group_id = ? AND chat_id = ? ORDER BY message_id",
+                        (media_group_id, PUBLIC_GROUP_ID)
+                    )
+                    rows = await c.fetchall()
+            if rows:
+                for ftype, fid in rows:
+                    if ftype == "photo":
+                        files_list.append({"type": "photo", "file_id": fid})
+                    elif ftype == "video":
+                        files_list.append({"type": "video", "file_id": fid})
+            else:
+                # Fallback minimal si pas d'archive (rare)
+                if original.photo:
+                    files_list.append({"type": "photo", "file_id": original.photo[-1].file_id})
+                elif original.video:
+                    files_list.append({"type": "video", "file_id": original.video.file_id})
+        else:
+            if original.photo:
+                files_list.append({"type": "photo", "file_id": original.photo[-1].file_id})
+            elif original.video:
+                files_list.append({"type": "video", "file_id": original.video.file_id})
+
+        report_id = f"PUB_{media_group_id or original.message_id}"
+        files_json = json.dumps(files_list)
+        created_ts = int(_now())
+        user_name = "— re-modération —"
+
+        # Enregistre en attente + push vers file admin
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
+                (report_id, text_src, files_json, created_ts, user_name)
+            )
+            await db.commit()
+
+        preview_text = _make_admin_preview(user_name, text_src, is_album=len(files_list) > 1)
+        await send_report_to_admin(context.application, report_id, preview_text, files_list)
+
+        # Message temporaire dans le public (option 2)
+        try:
+            temp = await context.bot.send_message(
+                chat_id=PUBLIC_GROUP_ID,
+                text="🛠 Ce message a été renvoyé en modération.\n(sera republié bientôt)",
+                message_thread_id=original.message_thread_id
+            )
+            asyncio.create_task(delete_after_delay([temp], 5))
+        except Exception as e:
+            print(f"[MODIFIER TEMP MSG] {e}")
+
+        # Nettoyage public : original + commande
+        try:
+            await original.delete()
+        except Exception as e:
+            print(f"[MODIFIER DEL ORIGINAL] {e}")
+        try:
+            await msg.delete()
+        except Exception as e:
+            print(f"[MODIFIER DEL CMD] {e}")
+
+    except Exception as e:
+        print(f"[HANDLE MODIFIER] {e}")
+        try:
+            m = await msg.reply_text(f"Erreur /modifier : {e}")
+            asyncio.create_task(delete_after_delay([msg, m], 8))
         except Exception:
             pass
 
@@ -1515,7 +1621,7 @@ def main():
                    .post_init(_post_init)
                    .build())
 
-            # ====== Handlers (inchangés + dashboard amélioré) ======
+            # ====== Handlers (inchangés + dashboard amélioré + /modifier) ======
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
@@ -1526,9 +1632,10 @@ def main():
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
 
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
+            app.add_handler(CommandHandler("modifier", handle_modifier_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
 
             app.add_handler(CommandHandler(
-                ["dashboard", "cancel", "deplacer"],
+                ["dashboard", "cancel", "deplacer", "modifier"],
                 handle_public_admin_command_cleanup,
                 filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
             ))
@@ -1544,6 +1651,7 @@ def main():
 
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
             app.add_handler(CommandHandler("deplacer", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
+            app.add_handler(CommandHandler("modifier", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
             app.add_handler(CommandHandler("dashboard", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("cancel", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
 
