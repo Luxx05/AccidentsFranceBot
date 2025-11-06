@@ -63,8 +63,8 @@ _last_heartbeat_alert_ts = 0.0
 # --- Link moderation (NOUVEAU) ---
 MUTE_LINKS_DURATION_SEC = 600  # 10 min de mute pour liens non autorisés
 ALLOWED_TG_USERNAMES = {
-    u.strip().lower() for u in os.getenv("ALLOWED_TG_USERNAMES", "AccidentsFR,AccidentsFranceBot").split(",")
-}
+    u.strip().lower() for u in (os.getenv("ALLOWED_TG_USERNAMES") or "").split(",") if u.strip()
+} or {"accidentsfr", "accidentsfrancebot"}
 
 accident_keywords = [
     "accident", "accrochage", "carambolage", "choc", "collision",
@@ -301,15 +301,17 @@ def _has_disallowed_link(msg) -> bool:
             username = None
             if "t.me/" in u or "telegram.me/" in u:
                 try:
-                    after = u.split("t.me/")[-1].split("telegram.me/")[-1]
+                    after = u.replace("https://", "").replace("http://", "")
+                    after = after.split("t.me/")[-1].split("telegram.me/")[-1]
+                    after = after.split("?")[0].split("#")[0]
+                    after = after.strip("/").split("/")[0]
+                    username = after.lstrip("@").lower() if after else None
                 except Exception:
-                    after = u
-                after = after.split("?")[0].split("/")[0]
-                username = after.lstrip("@")
+                    username = None
             elif u.startswith("tg://") and "domain=" in u:
                 try:
                     qs = u.split("domain=", 1)[1]
-                    username = qs.split("&")[0].split("#")[0].split("/")[0]
+                    username = qs.split("&")[0].split("#")[0].split("/")[0].lstrip("@").lower()
                 except Exception:
                     username = None
 
@@ -330,7 +332,7 @@ def _has_disallowed_link(msg) -> bool:
     t = text.lower()
     if "http://" in t or "https://" in t or "www." in t or "t.me/" in t or "telegram.me/" in t:
         for allowed in ALLOWED_TG_USERNAMES:
-            if f"t.me/{allowed.lower()}" in t:
+            if f"t.me/{allowed.lower()}" in t or f"telegram.me/{allowed.lower()}" in t or f"@{allowed.lower()}" in t:
                 return False
         return True
 
@@ -398,6 +400,14 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
         print(f"[IS_USER_ADMIN] Erreur API: {e}")
         return False
 
+# ==== Helper pour extraire l'ID user depuis report_id (safe pour 'reedit_*') ====
+def _extract_user_id_from_report_id(report_id: str) -> int | None:
+    try:
+        head = report_id.split("_", 1)[0]
+        return int(head) if head.isdigit() else None
+    except Exception:
+        return None
+
 # =========================
 # HANDLER /start (MP)
 # =========================
@@ -448,17 +458,13 @@ async def heartbeat_loop(application: Application):
                         _last_heartbeat_alert_ts = now
                     except Exception:
                         pass
-                # Stop polling => la boucle main() relancera
+                # Stop propre => la boucle main() relancera
                 try:
                     await application.stop()
-                except Exception:
-                    pass
-                break
-                try:
                     await application.shutdown()
                 except Exception:
                     pass
-                break
+                return  # un seul point de sortie
 
 # =========================
 # HANDLER MESSAGES USER
@@ -517,7 +523,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_state = SPAM_COUNT.get(user.id, {"count": 0, "last": 0})
         flood = _is_spam(user.id, media_group_id)
         gibberish = False
-        if len(text) >= 5:
+        if len(text) >= 12:  # <= affiné pour éviter faux positifs
             consonnes = sum(1 for c in text if c in "bcdfghjklmnpqrstvwxyz")
             voyelles = sum(1 for c in text if c in "aeiouy")
             ratio = consonnes / (voyelles + 1)
@@ -794,6 +800,7 @@ async def send_report_to_admin(application: Application, report_id: str, preview
         sent_ids.append(m.message_id)
 
         # 👉 Envoi des médias si présents
+        text_echo_needed = False  # <=== NEW
         if files:
             if len(files) == 1:
                 # Un seul média
@@ -802,20 +809,22 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     pm = await application.bot.send_photo(
                         chat_id=ADMIN_GROUP_ID,
                         photo=f["file_id"],
-                        caption=caption_text  # ⬅️ Ajout du texte ici
+                        caption=caption_text  # ⬅️ tente la caption
                     )
                 else:
                     pm = await application.bot.send_video(
                         chat_id=ADMIN_GROUP_ID,
                         video=f["file_id"],
-                        caption=caption_text  # ⬅️ Ajout du texte ici
+                        caption=caption_text  # ⬅️ tente la caption
                     )
                 sent_ids.append(pm.message_id)
+                # Si pas de caption (ou client qui ne l’affiche pas), on ré-echo en texte
+                text_echo_needed = bool(caption_text)  # <=== NEW
             else:
                 # Album : caption seulement sur le 1er élément
                 media_group = []
                 for i, f in enumerate(files):
-                    cap = caption_text if i == 0 else None  # ⬅️ 1ère légende
+                    cap = caption_text if i == 0 else None
                     if f["type"] == "photo":
                         media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
                     else:
@@ -826,6 +835,20 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     media=media_group
                 )
                 sent_ids.extend([x.message_id for x in msgs])
+                # Sur album, certains clients n’affichent pas la caption => on ré-echo
+                text_echo_needed = bool(caption_text)  # <=== NEW
+
+        # 👉 Ré-echo du texte pour garantir sa visibilité (après médias)
+        if text_echo_needed:
+            try:
+                tmsg = await application.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"📝 Texte :\n{caption_text}"
+                )
+                sent_ids.append(tmsg.message_id)
+            except Exception as e:
+                print(f"[ADMIN SEND TEXT ECHO] {e}")
+        # (si pas de fichiers, le preview contient déjà le texte clairement)
 
         # 👉 Enregistre les messages pour nettoyage
         await admin_outbox_track(report_id, sent_ids)
@@ -1458,24 +1481,19 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # --- REJECT & MUTE ---
             if action == "REJECTMUTE":
-                user_id = None
-                try:
-                    user_id_str, _ = report_id.split("_", 1)
-                    user_id = int(user_id_str)
-                except Exception:
-                    pass
-
+                user_id = _extract_user_id_from_report_id(report_id)
                 mute_duration = MUTE_DURATION_SPAM_SUBMISSION
                 mute_until_ts = int(_now() + mute_duration)
 
-                await db.execute(
-                    "INSERT OR REPLACE INTO muted_users (user_id, mute_until_ts) VALUES (?, ?)",
-                    (user_id, mute_until_ts)
-                )
+                if user_id:
+                    await db.execute(
+                        "INSERT OR REPLACE INTO muted_users (user_id, mute_until_ts) VALUES (?, ?)",
+                        (user_id, mute_until_ts)
+                    )
 
                 # stats: rejet
                 await _inc_counter(db, "rejected_total", 1)
-                await _add_event(db, "rejected", {"report_id": report_id, "muted": True})
+                await _add_event(db, "rejected", {"report_id": report_id, "muted": bool(user_id)})
 
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
@@ -1569,14 +1587,14 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             message_thread_id=target_thread_id
                         )
 
-                    # Notify user (best effort)
+                    # Notify user (best effort) — safe pour 'reedit_*'
                     try:
-                        user_chat_id_str, _ = report_id.split("_", 1)
-                        user_chat_id = int(user_chat_id_str)
-                        await context.bot.send_message(
-                            chat_id=user_chat_id,
-                            text="✅ Ton signalement a été publié dans le canal @AccidentsFR."
-                        )
+                        user_chat_id = _extract_user_id_from_report_id(report_id)
+                        if user_chat_id:
+                            await context.bot.send_message(
+                                chat_id=user_chat_id,
+                                text="✅ Ton signalement a été publié dans le canal @AccidentsFR."
+                            )
                     except Exception as e:
                         print(f"[NOTIFY USER APPROVE] {e}")
 
@@ -1628,7 +1646,8 @@ async def cleaner_loop():
                 await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
                 cutoff_ts_archive = int(now - CLEAN_MAX_AGE_ARCHIVE)
                 await db.execute("DELETE FROM media_archive WHERE timestamp < ?", (cutoff_ts_archive,))
-                if int(now) % 3600 == 0:
+                # purge plus soft (toutes les 6h)
+                if int(now) % (6*3600) == 0:
                     await db.execute("DELETE FROM edit_state")
                     await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),))
                     await db.execute("DELETE FROM admin_outbox") # Purge de sécurité
@@ -1854,40 +1873,30 @@ def main():
                    .post_init(_post_init)
                    .build())
 
-            # ====== Handlers (inchangés + dashboard amélioré + /modifier) ======
+            # ====== Handlers (unique, sans doublons) ======
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
-            app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
-
-            app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-
-            app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-            app.add_handler(CommandHandler("modifier", handle_modifier_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-
-            app.add_handler(CommandHandler(
-                ["dashboard", "cancel", "deplacer", "modifier"],
-                handle_public_admin_command_cleanup,
-                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
-            ))
-
-            app.add_handler(CallbackQueryHandler(on_button_click))
+            # Admin room uniquement
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
             app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
 
+            # Public (groupe)
             app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
-
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
-            app.add_handler(CommandHandler("deplacer", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
-            app.add_handler(CommandHandler("modifier", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
-            app.add_handler(CommandHandler("dashboard", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
-            app.add_handler(CommandHandler("cancel", handle_public_admin_command_cleanup, filters=filters.Chat(PUBLIC_GROUP_ID)))
+            app.add_handler(CommandHandler("modifier", handle_modifier_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
 
+            # Public : si non-admin tape la commande en message *non-réponse* => on nettoie
+            app.add_handler(CommandHandler(["dashboard", "cancel", "deplacer", "modifier"],
+                                           handle_public_admin_command_cleanup,
+                                           filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
+
+            # Boutons
+            app.add_handler(CallbackQueryHandler(on_button_click))
+
+            # Catch-all messages
             app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
             # ====== fin handlers ======
 
@@ -1898,12 +1907,10 @@ def main():
             # Si on sort proprement (watchdog stop), on notifie et on repart
             _notify_admin_sync("🟠 Bot redémarre (watchdog).")
 
-            # enregistrer un redémarrage
+            # enregistrer un redémarrage (safe)
             try:
-                with asyncio.run_coroutine_threadsafe(_log_restart(), asyncio.get_event_loop()):
-                    pass
+                asyncio.run(_log_restart())
             except Exception:
-                # si la loop n'est pas accessible, on le fera dans la prochaine itération
                 pass
 
             backoff = 2  # reset backoff après un run OK
