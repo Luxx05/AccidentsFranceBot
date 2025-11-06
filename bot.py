@@ -774,9 +774,7 @@ async def send_report_to_admin(application: Application, report_id: str, preview
     kb = _build_mod_keyboard(report_id)
     sent_ids = []
 
-    # >>> FIX TEXTE: on lit texte + user_name depuis la DB et on l'affiche
-    caption_text = None
-    user_name = None
+    # Lecture de la BDD pour récupérer texte + auteur
     try:
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute(
@@ -784,11 +782,54 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                 (report_id,)
             ) as cur:
                 row = await cur.fetchone()
-                if row:
-                    caption_text = (row[0] or "").strip()
-                    user_name = row[1]
+                caption_text = (row[0] or "").strip() if row and row[0] else ""
+                user_name = row[1] if row else "anonyme"
     except Exception as e:
-        print(f"[ADMIN SEND] caption fetch err: {e}")
+        print(f"[ADMIN SEND] DB fetch err: {e}")
+        caption_text = ""
+        user_name = "anonyme"
+
+    try:
+        # 1) Message d'aperçu (texte + boutons)
+        main_msg = await application.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=preview_text,
+            reply_markup=kb
+        )
+        sent_ids.append(main_msg.message_id)
+
+        # 2) Médias (si présents) — caption sur le 1er media uniquement
+        if files:
+            if len(files) == 1:
+                f = files[0]
+                if f["type"] == "photo":
+                    media_msg = await application.bot.send_photo(
+                        chat_id=ADMIN_GROUP_ID, photo=f["file_id"], caption=caption_text
+                    )
+                else:
+                    media_msg = await application.bot.send_video(
+                        chat_id=ADMIN_GROUP_ID, video=f["file_id"], caption=caption_text
+                    )
+                sent_ids.append(media_msg.message_id)
+            else:
+                media_group = []
+                for i, f in enumerate(files):
+                    cap = caption_text if i == 0 else None
+                    if f["type"] == "photo":
+                        media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
+                    else:
+                        media_group.append(InputMediaVideo(media=f["file_id"], caption=cap))
+                media_msgs = await application.bot.send_media_group(
+                    chat_id=ADMIN_GROUP_ID,
+                    media=media_group
+                )
+                sent_ids.extend([m.message_id for m in media_msgs])
+
+        # 3) Enregistrer pour suppression future
+        await admin_outbox_track(report_id, sent_ids)
+
+    except Exception as e:
+        print(f"[ADMIN SEND ERROR] {e}")
 
     try:
         # 👉 1) Envoie le message d’aperçu + boutons (comme avant)
@@ -1248,7 +1289,7 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
-    # Admin only
+    # 1) Sécurité : commande réservée aux admins
     try:
         uid = msg.from_user.id
         is_admin = (uid in [1087968824, 136817688]) or await is_user_admin(context, PUBLIC_GROUP_ID, uid)
@@ -1260,7 +1301,7 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
 
     original = msg.reply_to_message
     if not original:
-        m = await msg.reply_text("Répondez à une publication avec /modifier.")
+        m = await msg.reply_text("Répondez à un message avec /modifier pour renvoyer en modération.")
         asyncio.create_task(delete_after_delay([msg, m], 5))
         return
 
@@ -1275,25 +1316,25 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         if media_group_id:
             rows = []
             async with aiosqlite.connect(DB_NAME) as db:
-                async with db.execute("""
+                async with db.execute(
+                    """
                     SELECT message_id, file_type, file_id, caption
                     FROM media_archive
                     WHERE media_group_id = ? AND chat_id = ?
                     ORDER BY message_id ASC
-                """, (media_group_id, PUBLIC_GROUP_ID)) as cur:
+                    """,
+                    (media_group_id, PUBLIC_GROUP_ID),
+                ) as cur:
                     rows = await cur.fetchall()
 
             album_caption = None
-            for mid, ftype, fid, cap in rows:
+            for _, _, _, cap in rows:
                 if not album_caption and cap:
                     album_caption = cap.strip()
 
-            for mid, ftype, fid, cap in rows:
+            for mid, ftype, fid, _ in rows:
                 to_delete.append(mid)
-                if ftype == "photo":
-                    files_list.append({"type": "photo", "file_id": fid})
-                elif ftype == "video":
-                    files_list.append({"type": "video", "file_id": fid})
+                files_list.append({"type": ftype, "file_id": fid})
 
             final_text = override_text or base_text or (album_caption or "")
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original.message_id}"
@@ -1308,12 +1349,13 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             to_delete.append(original.message_id)
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{original.message_id}"
 
-        # Sécurité Telegram
+        # Normalisation bout de texte
         if final_text and len(final_text) > 1024:
             final_text = final_text[:1021] + "…"
         if len(files_list) > 10:
             files_list = files_list[:10]
 
+        # Stockage BDD
         user = original.from_user
         user_name = f"@{user.username}" if user and user.username else "public"
         created_ts = int(time.time())
@@ -1326,23 +1368,16 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             )
             await db.commit()
 
-        # >>> EXACTEMENT la même preview que les MP
-        preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1))
-
+        # Prévisualisation (comme les MP)
+        preview_text = f"📩 Nouveau signalement (re-modération)\n👤 {user_name}\n\n{final_text or ''}"
         await REVIEW_QUEUE.put({"report_id": report_id, "preview_text": preview_text, "files": files_list})
 
-        # Nettoyage public
+        # Muting messages publics
         for mid in set(to_delete):
-            try:
-                await context.bot.delete_message(PUBLIC_GROUP_ID, mid)
-            except Exception:
-                pass
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+            await context.bot.delete_message(PUBLIC_GROUP_ID, mid)
 
-        info = await context.bot.send_message(PUBLIC_GROUP_ID, "♻️ Publication renvoyée en modération.")
+        await msg.delete()
+        info = await context.bot.send_message(chat_id=PUBLIC_GROUP_ID, text="♻️ Publication retirée — renvoyée en modération.")
         asyncio.create_task(delete_after_delay([info], 5))
 
     except Exception as e:
