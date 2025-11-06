@@ -707,54 +707,24 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     album = TEMP_ALBUMS.get(media_group_id)
     if album is None:
         TEMP_ALBUMS[media_group_id] = {
-            "files": [], "text": piece_text, "user_name": user_name,
-            "chat_id": chat_id, "ts": _now(), "done": False,
+            "files": [],
+            "text": piece_text,
+            "user_name": user_name,
+            "chat_id": chat_id,
+            "ts": _now(),
+            "done": False,
         }
         album = TEMP_ALBUMS[media_group_id]
+
     if media_type and file_id:
-    album["files"].append({"type": media_type, "file_id": file_id})
+        album["files"].append({"type": media_type, "file_id": file_id})
+
     if piece_text and not album.get("text"):
-    album["text"] = piece_text
+        album["text"] = piece_text
+
     album["ts"] = _now()
     asyncio.create_task(finalize_album_later(media_group_id, context))
-
-async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(0.5)
-    album = TEMP_ALBUMS.get(media_group_id)
-    if album is None or album["done"]:
-        return
-    album["done"] = True
-    report_id = f"{album['chat_id']}_{media_group_id}"
-    ALREADY_FORWARDED_ALBUMS.add(report_id)
-    files_list = album["files"]
-    files_json = json.dumps(files_list)
-    report_text = album["text"]
-    created_ts = int(_now())
-    user_name = album["user_name"]
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
-                (report_id, report_text, files_json, created_ts, user_name)
-            )
-            await _add_event(db, "album_received", {"count": len(files_list)})
-            await db.commit()
-    except Exception as e:
-        print(f"[DB INSERT ALBUM] {e}")
-        return
-    await REVIEW_QUEUE.put({
-        "report_id": report_id,
-        "preview_text": _make_admin_preview(user_name, report_text, is_album=True),
-        "files": files_list,
-    })
-    try:
-        await context.bot.send_message(
-            chat_id=album["chat_id"],
-            text="✅ Reçu (album). Vérif avant publication."
-        )
-    except Exception:
-        pass
-    TEMP_ALBUMS.pop(media_group_id, None)
+    return
 
 # =========================
 # ADMIN
