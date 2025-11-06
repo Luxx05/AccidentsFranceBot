@@ -43,10 +43,10 @@ CLEAN_MAX_AGE_ARCHIVE = 3600 * 24 * 3  # 3j
 
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 30
-RESTART_MIN_SLEEP_SEC = 3   # délai minimum avant relance (anti-spam)
-RESTART_MAX_SLEEP_SEC = 60  # délai max si redémarrages en boucle
+RESTART_MIN_SLEEP_SEC = 3
+RESTART_MAX_SLEEP_SEC = 60
 
-# Compatibilité avec ancien nom de variable (évite NameError)
+# Compat legacy
 RESTART_BACKOFF_MIN_SEC = RESTART_MIN_SLEEP_SEC
 RESTART_BACKOFF_MAX_SEC = RESTART_MAX_SLEEP_SEC
 
@@ -55,19 +55,16 @@ PUBLIC_TOPIC_RADARS_ID = 222
 PUBLIC_TOPIC_GENERAL_ID = None
 
 # --- Anti-spam notifications admin ---
-ADMIN_NOTIFY_COOLDOWN_SEC = 300         # 5 min entre 2 notifs "crash/redémarre"
-HEARTBEAT_ALERT_COOLDOWN_SEC = 300      # 5 min entre 2 alertes "connexion perdue"
+ADMIN_NOTIFY_COOLDOWN_SEC = 300
+HEARTBEAT_ALERT_COOLDOWN_SEC = 300
 _last_admin_notify_ts = 0.0
 _last_heartbeat_alert_ts = 0.0
 
-# --- Link moderation (NOUVEAU) ---
-MUTE_LINKS_DURATION_SEC = 600  # 10 min de mute pour liens non autorisés
+# --- Link moderation ---
+MUTE_LINKS_DURATION_SEC = 600  # 10 min
 ALLOWED_TG_USERNAMES = {
     u.strip().lower() for u in (os.getenv("ALLOWED_TG_USERNAMES") or "").split(",") if u.strip()
 } or {"accidentsfr", "accidentsfrancebot"}
-
-# --- Echo texte uniquement pour /modifier (reedit_*) ---
-ECHO_TEXT_ONLY_FOR_REEDIT = True
 
 accident_keywords = [
     "accident", "accrochage", "carambolage", "choc", "collision",
@@ -99,7 +96,7 @@ radar_keywords = [
 LAST_MSG_TIME = {}
 SPAM_COUNT = {}
 TEMP_ALBUMS = {}
-REVIEW_QUEUE = None  # <-- bind à la loop dans _post_init
+REVIEW_QUEUE = None  # ⚠️ créée dans _post_init sur la loop active
 ALREADY_FORWARDED_ALBUMS = set()
 
 # =========================
@@ -160,13 +157,13 @@ async def init_db():
                     value TEXT
                 )
             """)
-            # ======= NOUVEAU : tables statistiques =======
+            # stats
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS stats_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_type TEXT,           -- 'published','rejected','album_received','spam_blocked','restart','crash'
-                    ts INTEGER,                -- epoch seconds
-                    meta TEXT                  -- JSON optionnel
+                    event_type TEXT,
+                    ts INTEGER,
+                    meta TEXT
                 )
             """)
             await db.execute("""
@@ -175,7 +172,6 @@ async def init_db():
                     value INTEGER
                 )
             """)
-            # seed counters if missing
             for k in ("published_total","rejected_total","spam_blocked_total","auto_restarts_total"):
                 await db.execute("INSERT OR IGNORE INTO counters(key,value) VALUES(?,0)", (k,))
             await db.commit()
@@ -187,8 +183,11 @@ async def init_db():
 # ======= OUTILS STATS =======
 async def _inc_counter(db, key: str, delta: int = 1):
     try:
-        await db.execute("INSERT INTO counters(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = value + ?",
-                         (key, delta, delta))
+        await db.execute(
+            "INSERT INTO counters(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value = value + ?",
+            (key, delta, delta)
+        )
     except Exception as e:
         print(f"[COUNTER INC {key}] {e}")
 
@@ -207,13 +206,15 @@ async def _add_event(db, event_type: str, meta: dict | None = None, ts: int | No
         print(f"[ADD EVENT {event_type}] {e}")
 
 async def _count_events(db, event_type: str, since_ts: int) -> int:
-    async with db.execute("SELECT COUNT(*) FROM stats_events WHERE event_type = ? AND ts >= ?", (event_type, since_ts)) as cur:
+    async with db.execute(
+        "SELECT COUNT(*) FROM stats_events WHERE event_type = ? AND ts >= ?",
+        (event_type, since_ts)
+    ) as cur:
         row = await cur.fetchone()
         return int(row[0] or 0)
 
 async def _busiest_hour_range_last24(db) -> str | None:
     since = int(time.time()) - 24*3600
-    # on compte par heure locale (0..23)
     try:
         async with db.execute("""
             SELECT strftime('%H', datetime(ts,'unixepoch','localtime')) AS hh, COUNT(*)
@@ -225,9 +226,7 @@ async def _busiest_hour_range_last24(db) -> str | None:
         """, (since,)) as cur:
             row = await cur.fetchone()
             if not row: return None
-            start_h = int(row[0])
-            end_h = (start_h + 3) % 24
-            # format "19h – 22h"
+            start_h = int(row[0]); end_h = (start_h + 3) % 24
             return f"{start_h}h – {end_h}h"
     except Exception as e:
         print(f"[BUSIEST HOUR] {e}")
@@ -268,19 +267,13 @@ def _build_mod_keyboard(report_id: str) -> InlineKeyboardMarkup:
         ]
     ])
 
-# ===== Helpers liens (NOUVEAU) =====
+# ---- liens
 def _extract_entities_text(msg) -> tuple[list, list]:
     ents = getattr(msg, "entities", []) or []
     cents = getattr(msg, "caption_entities", []) or []
     return ents, cents
 
 def _has_disallowed_link(msg) -> bool:
-    """
-    True si le message contient un lien non autorisé :
-    - URL non Telegram -> bloqué
-    - URL Telegram -> bloqué sauf si username autorisé
-    - @mention -> bloquée sauf si username autorisé
-    """
     text = (msg.caption or msg.text or "")
     ents, cents = _extract_entities_text(msg)
     allents = list(ents) + list(cents)
@@ -299,7 +292,7 @@ def _has_disallowed_link(msg) -> bool:
             u = url.strip().lower()
 
             if not ("t.me/" in u or "telegram.me/" in u or u.startswith("tg://")):
-                return True  # lien externe
+                return True
 
             username = None
             if "t.me/" in u or "telegram.me/" in u:
@@ -320,7 +313,7 @@ def _has_disallowed_link(msg) -> bool:
 
             if username and username.lower() in ALLOWED_TG_USERNAMES:
                 continue
-            return True  # lien telegram vers autre chose
+            return True
 
         elif et == "mention":
             try:
@@ -331,11 +324,12 @@ def _has_disallowed_link(msg) -> bool:
             if username not in ALLOWED_TG_USERNAMES:
                 return True
 
-    # fallback si pas d'entités mais lien brut
     t = text.lower()
     if "http://" in t or "https://" in t or "www." in t or "t.me/" in t or "telegram.me/" in t:
         for allowed in ALLOWED_TG_USERNAMES:
-            if f"t.me/{allowed.lower()}" in t or f"telegram.me/{allowed.lower()}" in t or f"@{allowed.lower()}" in t:
+            if (f"t.me/{allowed.lower()}" in t or
+                f"telegram.me/{allowed.lower()}" in t or
+                f"@{allowed.lower()}" in t):
                 return False
         return True
 
@@ -353,7 +347,7 @@ async def delete_after_delay(messages: list, delay_seconds: int):
         except Exception as e:
             print(f"[DELETE_AFTER_DELAY] {e}")
 
-# --- Admin outbox : purge / track ---
+# --- Admin outbox
 async def admin_outbox_delete(report_id: str, bot):
     try:
         async with aiosqlite.connect(DB_NAME) as db:
@@ -383,7 +377,7 @@ async def admin_outbox_track(report_id: str, message_ids: list[int]):
     except Exception as e:
         print(f"[ADMIN OUTBOX TRACK] {e}")
 
-# Outil pour vérifier les admins (avec cache)
+# Admin check
 async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     if user_id in [1087968824, 136817688]:
         return True
@@ -403,7 +397,7 @@ async def is_user_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_i
         print(f"[IS_USER_ADMIN] Erreur API: {e}")
         return False
 
-# ==== Helper pour extraire l'ID user depuis report_id (safe pour 'reedit_*') ====
+# Helper pour user_id depuis report_id (safe reedit_)
 def _extract_user_id_from_report_id(report_id: str) -> int | None:
     try:
         head = report_id.split("_", 1)[0]
@@ -415,7 +409,6 @@ def _extract_user_id_from_report_id(report_id: str) -> int | None:
 # HANDLER /start (MP)
 # =========================
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envoie le message d’accueil en MP quand l’utilisateur clique ‘Démarrer’ (/start)."""
     welcome = (
         "Bonjour ! Je suis le bot officiel de @AccidentsFR.\n\n"
         "🤫 Toutes vos soumissions ici sont 100% ANONYMES.\n\n"
@@ -434,11 +427,6 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # WATCHDOG / HEARTBEAT
 # =========================
 async def heartbeat_loop(application: Application):
-    """
-    Ping Telegram toutes les 45s. Si 3 échecs consécutifs, on prévient (si possible),
-    puis on stop() l'app pour déclencher le redémarrage dans la boucle main().
-    (Throttle intégré pour éviter le spam.)
-    """
     global _last_heartbeat_alert_ts
     failures = 0
     while True:
@@ -450,7 +438,6 @@ async def heartbeat_loop(application: Application):
             failures += 1
             print(f"[HEARTBEAT] échec {failures}/3 : {e}")
             if failures >= 3:
-                # Alerte unique (cooldown)
                 now = _now()
                 if now - _last_heartbeat_alert_ts >= HEARTBEAT_ALERT_COOLDOWN_SEC:
                     try:
@@ -461,13 +448,23 @@ async def heartbeat_loop(application: Application):
                         _last_heartbeat_alert_ts = now
                     except Exception:
                         pass
-                # Stop propre => la boucle main() relancera
                 try:
                     await application.stop()
                     await application.shutdown()
                 except Exception:
                     pass
-                return  # un seul point de sortie
+                return
+
+# =========================
+# QUEUE UTILS (fix event-loop)
+# =========================
+def get_review_queue_from_context(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Queue:
+    q = context.application.bot_data.get("review_queue")
+    if q is None:
+        # fallback ultra-rare
+        q = asyncio.Queue()
+        context.application.bot_data["review_queue"] = q
+    return q
 
 # =========================
 # HANDLER MESSAGES USER
@@ -526,7 +523,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_state = SPAM_COUNT.get(user.id, {"count": 0, "last": 0})
         flood = _is_spam(user.id, media_group_id)
         gibberish = False
-        if len(text) >= 12:  # <= affiné pour éviter faux positifs
+        if len(text) >= 12:
             consonnes = sum(1 for c in text if c in "bcdfghjklmnpqrstvwxyz")
             voyelles = sum(1 for c in text if c in "aeiouy")
             ratio = consonnes / (voyelles + 1)
@@ -538,7 +535,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await msg.delete()
             except Exception as e:
                 print(f"[ANTISPAM] delete fail: {e}")
-            # stats: spam_blocked
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     await _inc_counter(db, "spam_blocked_total", 1)
@@ -586,7 +582,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     print(f"[ANTISPAM] admin notify fail: {e}")
             return
 
-    # 4-bis) Modération des liens (PUBLIC) — (NOUVEAU)
+    # 4-bis) Modération des liens (PUBLIC)
     if chat_id == PUBLIC_GROUP_ID:
         try:
             is_admin_user = await is_user_admin(context, PUBLIC_GROUP_ID, user.id)
@@ -645,7 +641,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
     # 5) Archivage médias (admin + public)
-    if (chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID)) and (msg.photo or msg.video):
+    if (msg.chat_id in (PUBLIC_GROUP_ID, ADMIN_GROUP_ID)) and (msg.photo or msg.video):
         if not is_spam:
             media_type = "video" if msg.video else "photo"
             file_id = msg.video.file_id if msg.video else msg.photo[-1].file_id
@@ -659,7 +655,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         (message_id, chat_id, media_group_id, file_id, file_type, caption, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (msg.message_id, chat_id, media_group_id, file_id, media_type, caption, int(now_ts))
+                        (msg.message_id, msg.chat_id, msg.media_group_id, file_id, media_type, caption, int(now_ts))
                     )
                     await db.commit()
             except Exception as e:
@@ -667,9 +663,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 6) Ignorer texte non-commande dans les groupes
-    if chat_id == PUBLIC_GROUP_ID:
+    if msg.chat_id == PUBLIC_GROUP_ID:
         return
-    if chat_id == ADMIN_GROUP_ID:
+    if msg.chat_id == ADMIN_GROUP_ID:
         return
 
     # 7) Traitement privé (soumissions)
@@ -710,11 +706,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             print(f"[DB INSERT] {e}")
             return
-        # Safe guard si redeploy très rapide (devrait déjà être bind via _post_init)
-        global REVIEW_QUEUE
-        if REVIEW_QUEUE is None:
-            REVIEW_QUEUE = asyncio.Queue()
-        await REVIEW_QUEUE.put({
+
+        q = get_review_queue_from_context(context)
+        await q.put({
             "report_id": report_id,
             "preview_text": _make_admin_preview(user_name, piece_text, is_album=False),
             "files": files_list,
@@ -759,16 +753,14 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
                 "INSERT INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?, ?, ?, ?, ?)",
                 (report_id, report_text, files_json, created_ts, user_name)
             )
-            # stats : album reçu
             await _add_event(db, "album_received", {"count": len(files_list)})
             await db.commit()
     except Exception as e:
         print(f"[DB INSERT ALBUM] {e}")
         return
-    global REVIEW_QUEUE
-    if REVIEW_QUEUE is None:
-        REVIEW_QUEUE = asyncio.Queue()
-    await REVIEW_QUEUE.put({
+
+    q = get_review_queue_from_context(context)
+    await q.put({
         "report_id": report_id,
         "preview_text": _make_admin_preview(user_name, report_text, is_album=True),
         "files": files_list,
@@ -786,10 +778,16 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 # ADMIN
 # =========================
 async def send_report_to_admin(application: Application, report_id: str, preview_text: str, files: list[dict]):
+    """
+    Envoie dans le groupe admin :
+    1) un message “preview + boutons”
+    2) les médias (caption sur le 1er item si dispo)
+    3) si report_id = reedit_... => écho-texte séparé pour ne jamais perdre la légende
+    """
     kb = _build_mod_keyboard(report_id)
     sent_ids = []
 
-    # >>> RÉCUPÈRE LA CAPTION (texte du report) POUR LE 1ER MÉDIA
+    # Récup texte (caption potentielle)
     caption_text = None
     try:
         async with aiosqlite.connect(DB_NAME) as db:
@@ -800,12 +798,10 @@ async def send_report_to_admin(application: Application, report_id: str, preview
     except Exception as e:
         print(f"[ADMIN SEND] caption fetch err: {e}")
 
-    # sécurité longueur caption Telegram
-    if caption_text and len(caption_text) > 1024:
-        caption_text = caption_text[:1021] + "…"
+    is_reedit = report_id.startswith("reedit_")
 
     try:
-        # 👉 Envoie le texte d’aperçu + boutons
+        # 1) preview + boutons
         m = await application.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
             text=preview_text,
@@ -813,10 +809,7 @@ async def send_report_to_admin(application: Application, report_id: str, preview
         )
         sent_ids.append(m.message_id)
 
-        # 👉 Envoi des médias si présents
-        is_reedit = report_id.startswith("reedit_")
-        text_echo_needed = False
-
+        # 2) médias
         if files:
             if len(files) == 1:
                 f = files[0]
@@ -824,17 +817,15 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     pm = await application.bot.send_photo(
                         chat_id=ADMIN_GROUP_ID,
                         photo=f["file_id"],
-                        caption=caption_text or None
+                        caption=caption_text
                     )
                 else:
                     pm = await application.bot.send_video(
                         chat_id=ADMIN_GROUP_ID,
                         video=f["file_id"],
-                        caption=caption_text or None
+                        caption=caption_text
                     )
                 sent_ids.append(pm.message_id)
-                # certains clients n’affichent pas la caption => on force un écho si /modifier
-                text_echo_needed = bool(caption_text) and is_reedit
             else:
                 media_group = []
                 for i, f in enumerate(files):
@@ -843,30 +834,20 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                         media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
                     else:
                         media_group.append(InputMediaVideo(media=f["file_id"], caption=cap))
-
                 msgs = await application.bot.send_media_group(
                     chat_id=ADMIN_GROUP_ID,
                     media=media_group
                 )
                 sent_ids.extend([x.message_id for x in msgs])
-                # albums : caption souvent perdue => écho si /modifier
-                text_echo_needed = bool(caption_text) and is_reedit
-        else:
-            # texte seul : on renvoie le texte clair si /modifier (pour ne pas dépendre du preview visuel)
-            text_echo_needed = bool(caption_text) and is_reedit
 
-        # 👉 Écho texte garanti (seulement pour /modifier)
-        if text_echo_needed:
-            try:
-                tmsg = await application.bot.send_message(
-                    chat_id=ADMIN_GROUP_ID,
-                    text=f"📝 Texte :\n{caption_text}"
-                )
-                sent_ids.append(tmsg.message_id)
-            except Exception as e:
-                print(f"[ADMIN SEND TEXT ECHO] {e}")
+        # 3) écho-texte séparé (seulement reedit_)
+        if is_reedit and (caption_text and caption_text.strip()):
+            te = await application.bot.send_message(
+                chat_id=ADMIN_GROUP_ID,
+                text=f"📝 Texte :\n{caption_text}"
+            )
+            sent_ids.append(te.message_id)
 
-        # 👉 Enregistre les messages pour nettoyage
         await admin_outbox_track(report_id, sent_ids)
 
     except Exception as e:
@@ -956,7 +937,6 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            # En attente / mutés / édition
             async with db.cursor() as c:
                 await c.execute("SELECT COUNT(*) FROM pending_reports")
                 pending_count = (await c.fetchone())[0]
@@ -965,20 +945,17 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await c.execute("SELECT COUNT(*) FROM edit_state")
                 edit_count = (await c.fetchone())[0]
 
-            # Totaux publish/reject/spam
             published_total = await _get_counter(db, "published_total")
             rejected_total = await _get_counter(db, "rejected_total")
             spam_total = await _get_counter(db, "spam_blocked_total")
             auto_restarts_total = await _get_counter(db, "auto_restarts_total")
 
-            # Fenêtre 24h
             since_24h = int(time.time()) - 24*3600
             published_24h = await _count_events(db, "published", since_24h)
             albums_24h = await _count_events(db, "album_received", since_24h)
             spam_24h = await _count_events(db, "spam_blocked", since_24h)
             busiest = await _busiest_hour_range_last24(db)
 
-            # Derniers timestamps système
             async with db.execute("SELECT value FROM bot_state WHERE key='last_restart_ts'") as cur:
                 row = await cur.fetchone()
                 last_restart_ts = int(row[0]) if row else None
@@ -986,11 +963,9 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 row = await cur.fetchone()
                 last_crash_ts = int(row[0]) if row else None
 
-        # Comptage membres
         member_count = await context.bot.get_chat_member_count(PUBLIC_GROUP_ID)
         member_count = max(0, member_count - 2)
 
-        # Uptime
         uptime_seconds = int(time.time() - START_TIME)
         m, s = divmod(uptime_seconds, 60)
         h, m = divmod(m, 60)
@@ -998,12 +973,10 @@ async def handle_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uptime_str = f"{d}j {h}h {m}m"
         edit_status = "🟢 Non" if edit_count == 0 else "🛑 Oui"
 
-        # Pourcentages
         rej_pct = 0.0
         if published_total + rejected_total > 0:
             rej_pct = (rejected_total * 100.0) / (published_total + rejected_total)
 
-        # Formats dates
         def fmt_ts(ts):
             return time.strftime('%d/%m %H:%M', time.localtime(ts)) if ts else "—"
 
@@ -1151,7 +1124,7 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 
         if not is_admin_check_passed:
             try:
-                await msg.delete()  # Supprime la commande du non-admin
+                await msg.delete()
             except Exception: pass
             return
     except Exception as e:
@@ -1247,14 +1220,10 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             print(f"[DEPLACER PUBLIC] delete cmd: {e}")
 
-        # (déplacement public ne compte pas une nouvelle publication)
-
     except Exception as e:
         print(f"[DEPLACER PUB] {e}")
         try:
-            # Fallback
             if "Album non trouvé" in str(e) and (original_msg.photo or original_msg.video):
-                print("[DEPLACER] Fallback déplacement simple")
                 photo = original_msg.photo[-1].file_id if original_msg.photo else None
                 video = original_msg.video.file_id if original_msg.video else None
                 if photo:
@@ -1270,17 +1239,15 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
             pass
 
 # =========================
-# /MODIFIER (PUBLIC -> renvoi en modération avec album complet)
+# /MODIFIER (PUBLIC -> renvoi en modération)
 # =========================
 async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
-    # 1️⃣ Sécurité : commande réservée aux admins du groupe PUBLIC
+    # Admin only (public)
     try:
         user_id = msg.from_user.id
-        is_admin_check = (
-            user_id in [1087968824, 136817688]
-        ) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
+        is_admin_check = (user_id in [1087968824, 136817688]) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         if not is_admin_check:
             try:
                 await msg.delete()
@@ -1291,13 +1258,10 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         print(f"[MODIFIER CHECK] {e}")
         return
 
-    # 2️⃣ Il faut répondre à un message
     original_msg = msg.reply_to_message
     if not original_msg:
         try:
-            m = await msg.reply_text(
-                "Usage : répondez à un message avec /modifier pour l’envoyer en re-modération."
-            )
+            m = await msg.reply_text("Usage : répondez à un message avec /modifier pour l’envoyer en re-modération.")
             asyncio.create_task(delete_after_delay([msg, m], 6))
         except Exception:
             pass
@@ -1311,16 +1275,10 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         message_ids_to_delete = []
         final_text = None
 
-        # ======================================
-        # 🔹 ALBUM
-        # ======================================
         if media_group_id:
-            files_list = []
-            message_ids_to_delete = []
             album_caption = None
             base_text = (original_msg.caption or original_msg.text or "").strip()
             rows = []
-
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     async with db.execute(
@@ -1337,22 +1295,17 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                 print(f"[MODIFIER album fetch] {e}")
 
             if rows:
-                # Cherche la première légende non vide dans l’album
                 for mid, file_type, file_id, cap in rows:
                     if not album_caption and cap:
                         album_caption = cap.strip()
-
-                # Liste des médias
                 for mid, file_type, file_id, cap in rows:
                     message_ids_to_delete.append(mid)
                     if file_type == "photo":
                         files_list.append({"type": "photo", "file_id": file_id})
                     elif file_type == "video":
                         files_list.append({"type": "video", "file_id": file_id})
-
                 final_text = override_text or base_text or (album_caption or "")
             else:
-                # Pas trouvé dans l’archive : fallback basique
                 base_text = (original_msg.caption or original_msg.text or "").strip()
                 final_text = override_text or base_text or ""
                 if original_msg.photo:
@@ -1361,7 +1314,6 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                     files_list.append({"type": "video", "file_id": original_msg.video.file_id})
                 message_ids_to_delete.append(original_msg.message_id)
 
-            # Sécurité Telegram
             if final_text and len(final_text) > 1024:
                 final_text = final_text[:1021] + "…"
             if len(files_list) > 10:
@@ -1369,9 +1321,6 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
 
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
 
-        # ======================================
-        # 🔹 MESSAGE SIMPLE (texte seul ou 1 média)
-        # ======================================
         else:
             base_text = (original_msg.caption or original_msg.text or "").strip()
             final_text = override_text or base_text or ""
@@ -1384,9 +1333,6 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             message_ids_to_delete.append(original_msg.message_id)
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{original_msg.message_id}"
 
-        # ======================================
-        # 🔹 Sauvegarde & Envoi admin
-        # ======================================
         user = original_msg.from_user
         user_name = f"@{user.username}" if user and user.username else "public"
         created_ts = int(time.time())
@@ -1402,16 +1348,9 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         note = "\n\n♻️ Renvoi en modération depuis le groupe public."
         preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
 
-        global REVIEW_QUEUE
-        if REVIEW_QUEUE is None:
-            REVIEW_QUEUE = asyncio.Queue()
-        await REVIEW_QUEUE.put(
-            {"report_id": report_id, "preview_text": preview_text, "files": files_list}
-        )
+        q = get_review_queue_from_context(context)
+        await q.put({"report_id": report_id, "preview_text": preview_text, "files": files_list})
 
-        # ======================================
-        # 🔹 Nettoyage du public
-        # ======================================
         if media_group_id and not message_ids_to_delete:
             message_ids_to_delete.append(original_msg.message_id)
 
@@ -1426,7 +1365,6 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
-        # Message temporaire d’info
         try:
             info = await context.bot.send_message(
                 chat_id=PUBLIC_GROUP_ID,
@@ -1436,9 +1374,6 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
-    # ======================================
-    # 🔹 Gestion d'erreur
-    # ======================================
     except Exception as e:
         print(f"[MODIFIER PUB] {e}")
         try:
@@ -1459,14 +1394,12 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         async with aiosqlite.connect(DB_NAME) as db:
-            # Clean éventuel edit_state concurrent
             try:
                 await db.execute("DELETE FROM edit_state WHERE chat_id = ?", (chat_id,))
                 await db.commit()
             except Exception as e:
                 print(f"[BTN CLEAN EDIT_STATE] {e}")
 
-            # 1. Lire les infos
             async with db.cursor() as c:
                 await c.execute("SELECT text, files_json, user_name FROM pending_reports WHERE report_id = ?", (report_id,))
                 row = await c.fetchone()
@@ -1484,21 +1417,16 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "user_name": row[2]
             }
 
-            # --- REJECT ---
             if action == "REJECT":
                 m = await context.bot.send_message(ADMIN_GROUP_ID, "❌ Supprimé, non publié.")
                 asyncio.create_task(delete_after_delay([m], 5))
-
-                # stats: rejet
                 await _inc_counter(db, "rejected_total", 1)
                 await _add_event(db, "rejected", {"report_id": report_id})
-
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
                 await admin_outbox_delete(report_id, context.bot)
                 return
 
-            # --- REJECT & MUTE ---
             if action == "REJECTMUTE":
                 user_id = _extract_user_id_from_report_id(report_id)
                 mute_duration = MUTE_DURATION_SPAM_SUBMISSION
@@ -1510,10 +1438,8 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         (user_id, mute_until_ts)
                     )
 
-                # stats: rejet
                 await _inc_counter(db, "rejected_total", 1)
                 await _add_event(db, "rejected", {"report_id": report_id, "muted": bool(user_id)})
-
                 await db.execute("DELETE FROM pending_reports WHERE report_id = ?", (report_id,))
                 await db.commit()
 
@@ -1532,7 +1458,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await admin_outbox_delete(report_id, context.bot)
                 return
 
-            # --- EDIT (prompt) ---
             if action == "EDIT":
                 current_text = info.get("text", "")
                 try:
@@ -1556,7 +1481,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     asyncio.create_task(delete_after_delay([m], 8))
                 return
 
-            # --- APPROVE ---
             if action == "APPROVE":
                 files = info["files"]
                 text = (info["text"] or "").strip()
@@ -1606,7 +1530,7 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             message_thread_id=target_thread_id
                         )
 
-                    # Notify user (best effort) — safe pour 'reedit_*'
+                    # notify user (safe pour reedit)
                     try:
                         user_chat_id = _extract_user_id_from_report_id(report_id)
                         if user_chat_id:
@@ -1617,7 +1541,6 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         print(f"[NOTIFY USER APPROVE] {e}")
 
-                    # stats: publication
                     await _inc_counter(db, "published_total", 1)
                     await _add_event(db, "published", {"report_id": report_id})
 
@@ -1642,17 +1565,15 @@ async def on_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def worker_loop(application: Application):
     print("👷 Worker démarré")
+    q: asyncio.Queue = application.bot_data["review_queue"]
     while True:
         try:
-            if REVIEW_QUEUE is None:
-                await asyncio.sleep(0.1)
-                continue
-            item = await REVIEW_QUEUE.get()
+            item = await q.get()
             rid = item["report_id"]
             preview = item["preview_text"]
             files = item["files"]
             await send_report_to_admin(application, rid, preview, files)
-            REVIEW_QUEUE.task_done()
+            q.task_done()
         except Exception as e:
             print(f"[WORKER] {e}")
             await asyncio.sleep(1)
@@ -1668,11 +1589,10 @@ async def cleaner_loop():
                 await db.execute("DELETE FROM pending_reports WHERE created_ts < ?", (cutoff_ts_pending,))
                 cutoff_ts_archive = int(now - CLEAN_MAX_AGE_ARCHIVE)
                 await db.execute("DELETE FROM media_archive WHERE timestamp < ?", (cutoff_ts_archive,))
-                # purge plus soft (toutes les 6h)
                 if int(now) % (6*3600) == 0:
                     await db.execute("DELETE FROM edit_state")
                     await db.execute("DELETE FROM muted_users WHERE mute_until_ts < ?", (int(now),))
-                    await db.execute("DELETE FROM admin_outbox") # Purge de sécurité
+                    await db.execute("DELETE FROM admin_outbox")
                 await db.commit()
 
             cutoff_ts_spam = now - CLEAN_MAX_AGE_SPAM
@@ -1714,7 +1634,6 @@ def run_flask():
 # =========================
 # COMMANDES /lock et /unlock
 # =========================
-
 DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_messages=True,
     can_send_audios=True,
@@ -1749,19 +1668,13 @@ LOCK_PERMISSIONS = ChatPermissions(
 
 async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
             await msg.delete()
         except Exception: pass
         return
-
     try:
-        await context.bot.set_chat_permissions(
-            chat_id=PUBLIC_GROUP_ID,
-            permissions=LOCK_PERMISSIONS
-        )
-
+        await context.bot.set_chat_permissions(chat_id=PUBLIC_GROUP_ID, permissions=LOCK_PERMISSIONS)
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as c:
                 await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
@@ -1770,7 +1683,6 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
                 except Exception: pass
-
         sent_msg = await context.bot.send_message(
             chat_id=PUBLIC_GROUP_ID,
             text="🔒 Le chat a été temporairement verrouillé par un administrateur."
@@ -1781,9 +1693,7 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("lock_message_id", str(sent_msg.message_id))
             )
             await db.commit()
-
         await msg.delete()
-
     except Exception as e:
         print(f"[LOCK] Erreur: {e}")
         try:
@@ -1793,19 +1703,13 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
             await msg.delete()
         except Exception: pass
         return
-
     try:
-        await context.bot.set_chat_permissions(
-            chat_id=PUBLIC_GROUP_ID,
-            permissions=DEFAULT_PERMISSIONS
-        )
-
+        await context.bot.set_chat_permissions(chat_id=PUBLIC_GROUP_ID, permissions=DEFAULT_PERMISSIONS)
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.cursor() as c:
                 await c.execute("SELECT value FROM bot_state WHERE key = 'lock_message_id'")
@@ -1814,18 +1718,11 @@ async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
                 except Exception: pass
-
             await db.execute("DELETE FROM bot_state WHERE key = 'lock_message_id'")
             await db.commit()
-
-        sent_msg = await context.bot.send_message(
-            chat_id=PUBLIC_GROUP_ID,
-            text="🔓 Le chat est déverrouillé."
-        )
-
+        sent_msg = await context.bot.send_message(chat_id=PUBLIC_GROUP_ID, text="🔓 Le chat est déverrouillé.")
         await msg.delete()
         asyncio.create_task(delete_after_delay([sent_msg], 5))
-
     except Exception as e:
         print(f"[UNLOCK] Erreur: {e}")
         try:
@@ -1833,9 +1730,10 @@ async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_after_delay([msg, m], 10))
         except Exception: pass
 
-# NOUVEAU : Handler pour nettoyer les commandes admin tapées dans le public
+# =========================
+# CLEANUP commandes admin tapées par non-admin (public)
+# =========================
 async def handle_public_admin_command_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Supprime les commandes admin (/dashboard, /cancel) si tapées par un non-admin dans le public."""
     msg = update.message
     if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
@@ -1844,19 +1742,17 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
             pass
 
 # =========================
-# MAIN + AUTO-RESTART (+ throttle notifs)
+# MAIN + AUTO-RESTART
 # =========================
 async def _post_init(application: Application):
     try:
-        # IMPORTANT : (re)création de la Queue liée à la loop courante
-        global REVIEW_QUEUE
-        REVIEW_QUEUE = asyncio.Queue()
+        # Queue liée à la loop courante
+        application.bot_data["review_queue"] = asyncio.Queue()
 
         await init_db()
         asyncio.create_task(worker_loop(application))
         asyncio.create_task(cleaner_loop())
-        asyncio.create_task(heartbeat_loop(application))  # <= Watchdog 45s
-        # Annonce de relance (au moment où l'app est prête)
+        asyncio.create_task(heartbeat_loop(application))
         try:
             await application.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
@@ -1868,10 +1764,6 @@ async def _post_init(application: Application):
         print(f"[POST_INIT] {e}")
 
 def _notify_admin_sync(text: str, *, force: bool = False):
-    """
-    Notifie l'admin via l'API HTTP directe (hors PTB) pour être sûr d'envoyer
-    même si l'event loop est down. Throttle pour éviter le spam.
-    """
     global _last_admin_notify_ts
     now = _now()
     if not force and (now - _last_admin_notify_ts) < ADMIN_NOTIFY_COOLDOWN_SEC:
@@ -1886,11 +1778,10 @@ def _notify_admin_sync(text: str, *, force: bool = False):
         print(f"[NOTIFY_ADMIN_SYNC ERR] {e}")
 
 def main():
-    # Threads annexes
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    backoff = 2  # petit retry progressif propre (2s -> 4 -> 8 -> 16 -> 30)
+    backoff = 2
 
     while True:
         try:
@@ -1899,52 +1790,50 @@ def main():
                    .post_init(_post_init)
                    .build())
 
-            # ====== Handlers (unique, sans doublons) ======
+            # ====== Handlers (uniques) ======
             app.add_handler(CommandHandler("start", handle_start, filters=filters.ChatType.PRIVATE))
 
-            # Admin room uniquement
+            # Admin room
             app.add_handler(CommandHandler("cancel", handle_admin_cancel, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("dashboard", handle_dashboard, filters=filters.Chat(ADMIN_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_admin, filters=filters.Chat(ADMIN_GROUP_ID) & filters.REPLY))
             app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_edit))
 
-            # Public (groupe)
+            # Public
             app.add_handler(CommandHandler("lock", handle_lock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("unlock", handle_unlock, filters=filters.Chat(PUBLIC_GROUP_ID)))
             app.add_handler(CommandHandler("deplacer", handle_deplacer_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
             app.add_handler(CommandHandler("modifier", handle_modifier_public, filters=filters.Chat(PUBLIC_GROUP_ID) & filters.REPLY))
 
-            # Public : si non-admin tape la commande en message *non-réponse* => on nettoie
-            app.add_handler(CommandHandler(["dashboard", "cancel", "deplacer", "modifier"],
-                                           handle_public_admin_command_cleanup,
-                                           filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY))
+            # Cleanup commandes si non-réponse (non-admin)
+            app.add_handler(CommandHandler(
+                ["dashboard", "cancel", "deplacer", "modifier"],
+                handle_public_admin_command_cleanup,
+                filters=filters.Chat(PUBLIC_GROUP_ID) & ~filters.REPLY
+            ))
 
             # Boutons
             app.add_handler(CallbackQueryHandler(on_button_click))
 
-            # Catch-all messages
+            # Catch-all
             app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_user_message))
             # ====== fin handlers ======
 
             print("🚀 Bot démarré, en écoute…")
-            # NE PAS fermer la loop à la fin
             app.run_polling(poll_interval=POLL_INTERVAL, timeout=POLL_TIMEOUT, close_loop=False)
 
-            # Si on sort proprement (watchdog stop), on notifie et on repart
             _notify_admin_sync("🟠 Bot redémarre (watchdog).")
 
-            # enregistrer un redémarrage (safe)
             try:
                 asyncio.run(_log_restart())
             except Exception:
                 pass
 
-            backoff = 2  # reset backoff après un run OK
+            backoff = 2
 
         except Exception as e:
             print(f"[MAIN LOOP ERR] {e}")
             _notify_admin_sync(f"🔴 Bot crash détecté. Redémarrage…\n{e}")
-            # log crash + planifier restart
             try:
                 asyncio.run(_log_crash_and_plan_restart())
             except Exception:
@@ -1952,13 +1841,11 @@ def main():
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
-            # 🧼 Recrée une nouvelle event loop saine avant de relancer
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             except Exception:
                 pass
-
             continue
 
 async def _log_restart():
