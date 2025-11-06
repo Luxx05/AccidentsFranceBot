@@ -800,7 +800,6 @@ async def send_report_to_admin(application: Application, report_id: str, preview
         sent_ids.append(m.message_id)
 
         # 👉 Envoi des médias si présents
-        text_echo_needed = False  # <=== NEW
         if files:
             if len(files) == 1:
                 # Un seul média
@@ -809,22 +808,20 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     pm = await application.bot.send_photo(
                         chat_id=ADMIN_GROUP_ID,
                         photo=f["file_id"],
-                        caption=caption_text  # ⬅️ tente la caption
+                        caption=caption_text  # ⬅️ Ajout du texte ici
                     )
                 else:
                     pm = await application.bot.send_video(
                         chat_id=ADMIN_GROUP_ID,
                         video=f["file_id"],
-                        caption=caption_text  # ⬅️ tente la caption
+                        caption=caption_text  # ⬅️ Ajout du texte ici
                     )
                 sent_ids.append(pm.message_id)
-                # Si pas de caption (ou client qui ne l’affiche pas), on ré-echo en texte
-                text_echo_needed = bool(caption_text)  # <=== NEW
             else:
                 # Album : caption seulement sur le 1er élément
                 media_group = []
                 for i, f in enumerate(files):
-                    cap = caption_text if i == 0 else None
+                    cap = caption_text if i == 0 else None  # ⬅️ 1ère légende
                     if f["type"] == "photo":
                         media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
                     else:
@@ -835,20 +832,6 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     media=media_group
                 )
                 sent_ids.extend([x.message_id for x in msgs])
-                # Sur album, certains clients n’affichent pas la caption => on ré-echo
-                text_echo_needed = bool(caption_text)  # <=== NEW
-
-        # 👉 Ré-echo du texte pour garantir sa visibilité (après médias)
-        if text_echo_needed:
-            try:
-                tmsg = await application.bot.send_message(
-                    chat_id=ADMIN_GROUP_ID,
-                    text=f"📝 Texte :\n{caption_text}"
-                )
-                sent_ids.append(tmsg.message_id)
-            except Exception as e:
-                print(f"[ADMIN SEND TEXT ECHO] {e}")
-        # (si pas de fichiers, le preview contient déjà le texte clairement)
 
         # 👉 Enregistre les messages pour nettoyage
         await admin_outbox_track(report_id, sent_ids)
