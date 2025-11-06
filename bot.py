@@ -772,30 +772,62 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 async def send_report_to_admin(application: Application, report_id: str, preview_text: str, files: list[dict]):
     kb = _build_mod_keyboard(report_id)
     sent_ids = []
+
+    # >>> RÉCUPÈRE LA CAPTION (texte du report) POUR LE 1ER MÉDIA
+    caption_text = None
     try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT text FROM pending_reports WHERE report_id = ?", (report_id,)) as cur:
+                row = await cur.fetchone()
+                if row and row[0]:
+                    caption_text = (row[0] or "").strip()
+    except Exception as e:
+        print(f"[ADMIN SEND] caption fetch err: {e}")
+
+    try:
+        # 👉 Envoie le texte d’aperçu + boutons
         m = await application.bot.send_message(
-            chat_id=ADMIN_GROUP_ID, text=preview_text, reply_markup=kb,
+            chat_id=ADMIN_GROUP_ID,
+            text=preview_text,
+            reply_markup=kb,
         )
         sent_ids.append(m.message_id)
 
+        # 👉 Envoi des médias si présents
         if files:
             if len(files) == 1:
+                # Un seul média
                 f = files[0]
                 if f["type"] == "photo":
-                    pm = await application.bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=f["file_id"])
+                    pm = await application.bot.send_photo(
+                        chat_id=ADMIN_GROUP_ID,
+                        photo=f["file_id"],
+                        caption=caption_text  # ⬅️ Ajout du texte ici
+                    )
                 else:
-                    pm = await application.bot.send_video(chat_id=ADMIN_GROUP_ID, video=f["file_id"])
+                    pm = await application.bot.send_video(
+                        chat_id=ADMIN_GROUP_ID,
+                        video=f["file_id"],
+                        caption=caption_text  # ⬅️ Ajout du texte ici
+                    )
                 sent_ids.append(pm.message_id)
             else:
+                # Album : caption seulement sur le 1er élément
                 media_group = []
-                for f in files:
+                for i, f in enumerate(files):
+                    cap = caption_text if i == 0 else None  # ⬅️ 1ère légende
                     if f["type"] == "photo":
-                        media_group.append(InputMediaPhoto(media=f["file_id"]))
+                        media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
                     else:
-                        media_group.append(InputMediaVideo(media=f["file_id"]))
-                msgs = await application.bot.send_media_group(chat_id=ADMIN_GROUP_ID, media=media_group)
+                        media_group.append(InputMediaVideo(media=f["file_id"], caption=cap))
+
+                msgs = await application.bot.send_media_group(
+                    chat_id=ADMIN_GROUP_ID,
+                    media=media_group
+                )
                 sent_ids.extend([x.message_id for x in msgs])
 
+        # 👉 Enregistre les messages pour nettoyage
         await admin_outbox_track(report_id, sent_ids)
 
     except Exception as e:
