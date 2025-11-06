@@ -66,6 +66,9 @@ ALLOWED_TG_USERNAMES = {
     u.strip().lower() for u in (os.getenv("ALLOWED_TG_USERNAMES") or "").split(",") if u.strip()
 } or {"accidentsfr", "accidentsfrancebot"}
 
+# --- Echo texte uniquement pour /modifier (reedit_*) ---
+ECHO_TEXT_ONLY_FOR_REEDIT = True
+
 accident_keywords = [
     "accident", "accrochage", "carambolage", "choc", "collision",
     "crash", "sortie de route", "perte de contrôle", "perdu le contrôle",
@@ -96,7 +99,7 @@ radar_keywords = [
 LAST_MSG_TIME = {}
 SPAM_COUNT = {}
 TEMP_ALBUMS = {}
-REVIEW_QUEUE = asyncio.Queue()
+REVIEW_QUEUE = None  # <-- bind à la loop dans _post_init
 ALREADY_FORWARDED_ALBUMS = set()
 
 # =========================
@@ -707,6 +710,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             print(f"[DB INSERT] {e}")
             return
+        # Safe guard si redeploy très rapide (devrait déjà être bind via _post_init)
+        global REVIEW_QUEUE
+        if REVIEW_QUEUE is None:
+            REVIEW_QUEUE = asyncio.Queue()
         await REVIEW_QUEUE.put({
             "report_id": report_id,
             "preview_text": _make_admin_preview(user_name, piece_text, is_album=False),
@@ -758,6 +765,9 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         print(f"[DB INSERT ALBUM] {e}")
         return
+    global REVIEW_QUEUE
+    if REVIEW_QUEUE is None:
+        REVIEW_QUEUE = asyncio.Queue()
     await REVIEW_QUEUE.put({
         "report_id": report_id,
         "preview_text": _make_admin_preview(user_name, report_text, is_album=True),
@@ -790,6 +800,10 @@ async def send_report_to_admin(application: Application, report_id: str, preview
     except Exception as e:
         print(f"[ADMIN SEND] caption fetch err: {e}")
 
+    # sécurité longueur caption Telegram
+    if caption_text and len(caption_text) > 1024:
+        caption_text = caption_text[:1021] + "…"
+
     try:
         # 👉 Envoie le texte d’aperçu + boutons
         m = await application.bot.send_message(
@@ -800,28 +814,31 @@ async def send_report_to_admin(application: Application, report_id: str, preview
         sent_ids.append(m.message_id)
 
         # 👉 Envoi des médias si présents
+        is_reedit = report_id.startswith("reedit_")
+        text_echo_needed = False
+
         if files:
             if len(files) == 1:
-                # Un seul média
                 f = files[0]
                 if f["type"] == "photo":
                     pm = await application.bot.send_photo(
                         chat_id=ADMIN_GROUP_ID,
                         photo=f["file_id"],
-                        caption=caption_text  # ⬅️ Ajout du texte ici
+                        caption=caption_text or None
                     )
                 else:
                     pm = await application.bot.send_video(
                         chat_id=ADMIN_GROUP_ID,
                         video=f["file_id"],
-                        caption=caption_text  # ⬅️ Ajout du texte ici
+                        caption=caption_text or None
                     )
                 sent_ids.append(pm.message_id)
+                # certains clients n’affichent pas la caption => on force un écho si /modifier
+                text_echo_needed = bool(caption_text) and is_reedit
             else:
-                # Album : caption seulement sur le 1er élément
                 media_group = []
                 for i, f in enumerate(files):
-                    cap = caption_text if i == 0 else None  # ⬅️ 1ère légende
+                    cap = caption_text if i == 0 else None
                     if f["type"] == "photo":
                         media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
                     else:
@@ -832,6 +849,22 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     media=media_group
                 )
                 sent_ids.extend([x.message_id for x in msgs])
+                # albums : caption souvent perdue => écho si /modifier
+                text_echo_needed = bool(caption_text) and is_reedit
+        else:
+            # texte seul : on renvoie le texte clair si /modifier (pour ne pas dépendre du preview visuel)
+            text_echo_needed = bool(caption_text) and is_reedit
+
+        # 👉 Écho texte garanti (seulement pour /modifier)
+        if text_echo_needed:
+            try:
+                tmsg = await application.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"📝 Texte :\n{caption_text}"
+                )
+                sent_ids.append(tmsg.message_id)
+            except Exception as e:
+                print(f"[ADMIN SEND TEXT ECHO] {e}")
 
         # 👉 Enregistre les messages pour nettoyage
         await admin_outbox_track(report_id, sent_ids)
@@ -1369,6 +1402,9 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         note = "\n\n♻️ Renvoi en modération depuis le groupe public."
         preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
 
+        global REVIEW_QUEUE
+        if REVIEW_QUEUE is None:
+            REVIEW_QUEUE = asyncio.Queue()
         await REVIEW_QUEUE.put(
             {"report_id": report_id, "preview_text": preview_text, "files": files_list}
         )
@@ -1608,6 +1644,9 @@ async def worker_loop(application: Application):
     print("👷 Worker démarré")
     while True:
         try:
+            if REVIEW_QUEUE is None:
+                await asyncio.sleep(0.1)
+                continue
             item = await REVIEW_QUEUE.get()
             rid = item["report_id"]
             preview = item["preview_text"]
@@ -1809,6 +1848,10 @@ async def handle_public_admin_command_cleanup(update: Update, context: ContextTy
 # =========================
 async def _post_init(application: Application):
     try:
+        # IMPORTANT : (re)création de la Queue liée à la loop courante
+        global REVIEW_QUEUE
+        REVIEW_QUEUE = asyncio.Queue()
+
         await init_db()
         asyncio.create_task(worker_loop(application))
         asyncio.create_task(cleaner_loop())
