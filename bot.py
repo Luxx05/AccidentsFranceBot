@@ -769,75 +769,73 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 # =========================
 # ADMIN
 # =========================
-async def send_report_to_admin(
-    application: Application,
-    report_id: str,
-    preview_text: str,
-    files: list[dict],
-    raw_text: str | None = None,   # <<< ajouté
-):
+async def send_report_to_admin(application: Application, report_id: str, preview_text: str, files: list[dict]):
     kb = _build_mod_keyboard(report_id)
     sent_ids = []
 
-    # ---- Texte à utiliser pour la légende des médias ----
-    caption_text = (raw_text or "").strip()  # priorité au texte transmis
+    # 1) Source de vérité : pending_reports.text
+    caption_text = None
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT text FROM pending_reports WHERE report_id = ?", (report_id,)) as cur:
+                row = await cur.fetchone()
+                if row and row[0]:
+                    caption_text = (row[0] or "").strip()
+    except Exception as e:
+        print(f"[ADMIN SEND] caption fetch err: {e}")
 
+    # Fallback si vide
     if not caption_text:
-        # fallback DB (compat)
-        try:
-            async with aiosqlite.connect(DB_NAME) as db:
-                async with db.execute(
-                    "SELECT text FROM pending_reports WHERE report_id = ?",
-                    (report_id,),
-                ) as cur:
-                    row = await cur.fetchone()
-                    if row and row[0]:
-                        caption_text = (row[0] or "").strip()
-        except Exception as e:
-            print(f"[ADMIN SEND] caption fetch err: {e}")
-            preview_from_db = preview_text  # fallback si la BDD plante
+        caption_text = (preview_text or "").strip()
 
     try:
-        # 1) message d’aperçu + boutons
+        # 2) Aperçu + boutons
         m = await application.bot.send_message(
             chat_id=ADMIN_GROUP_ID,
-            text=preview_from_db,
+            text=preview_text,
             reply_markup=kb,
         )
         sent_ids.append(m.message_id)
 
-        # 2) médias (avec caption sur le 1er élément)
+        # 3) TEXTE séparé (jamais perdu)
+        if caption_text:
+            t = caption_text if len(caption_text) <= 4096 else (caption_text[:4093] + "…")
+            tmsg = await application.bot.send_message(chat_id=ADMIN_GROUP_ID, text=t)
+            sent_ids.append(tmsg.message_id)
+
+        # 4) Médias SANS caption (évite les bugs de caption d’album)
         if files:
             if len(files) == 1:
                 f = files[0]
                 if f["type"] == "photo":
-                    pm = await application.bot.send_photo(
-                        chat_id=ADMIN_GROUP_ID,
-                        photo=f["file_id"],
-                        caption=caption_text if caption_text else None
-                    )
+                    pm = await application.bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=f["file_id"])
                 else:
-                    pm = await application.bot.send_video(
-                        chat_id=ADMIN_GROUP_ID,
-                        video=f["file_id"],
-                        caption=caption_text if caption_text else None
-                    )
+                    pm = await application.bot.send_video(chat_id=ADMIN_GROUP_ID, video=f["file_id"])
                 sent_ids.append(pm.message_id)
             else:
                 media_group = []
-                for i, f in enumerate(files):
-                    cap = caption_text if (i == 0 and caption_text) else None
+                for f in files:
                     if f["type"] == "photo":
-                        media_group.append(InputMediaPhoto(media=f["file_id"], caption=cap))
+                        media_group.append(InputMediaPhoto(media=f["file_id"]))
                     else:
-                        media_group.append(InputMediaVideo(media=f["file_id"], caption=cap))
+                        media_group.append(InputMediaVideo(media=f["file_id"]))
                 msgs = await application.bot.send_media_group(chat_id=ADMIN_GROUP_ID, media=media_group)
                 sent_ids.extend([x.message_id for x in msgs])
 
+        # 5) Tracking outbox
         await admin_outbox_track(report_id, sent_ids)
 
     except Exception as e:
         print(f"[ADMIN SEND] {e}")
+        # Dernière bouée : au moins balancer un message texte brut si tout le reste foire
+        try:
+            fb = await application.bot.send_message(
+                chat_id=ADMIN_GROUP_ID,
+                text=f"⚠️ ADMIN SEND ERROR (report_id={report_id})\n\n{preview_text or '(preview vide)'}"
+            )
+            asyncio.create_task(delete_after_delay([fb], 20))
+        except Exception as e2:
+            print(f"[ADMIN SEND FALLBACK ERR] {e2}")
 
 async def handle_admin_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -1615,16 +1613,39 @@ async def worker_loop(application: Application):
     while True:
         try:
             item = await REVIEW_QUEUE.get()
-            rid = item["report_id"]
-            preview = item["preview_text"]
-            files = item["files"]
-            raw_text = item.get("text")  # <<< ajouté
+            rid = item.get("report_id")
+            preview = item.get("preview_text", "")
+            files = item.get("files", [])
 
-            await send_report_to_admin(application, rid, preview, files, raw_text=raw_text)
+            # ping debug côté admin pour vérifier que le worker tourne
+            try:
+                dbg = await application.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"🛠️ DEBUG: queue pop -> {rid}"
+                )
+                # auto-delete du ping pour ne pas polluer
+                asyncio.create_task(delete_after_delay([dbg], 3))
+            except Exception as e:
+                print(f"[WORKER DEBUG SEND] {e}")
+
+            try:
+                await send_report_to_admin(application, rid, preview, files)
+            except Exception as e:
+                print(f"[WORKER -> ADMIN SEND ERR] {e}")
+                # Fallback texte brut pour ne rien perdre
+                try:
+                    fb = await application.bot.send_message(
+                        chat_id=ADMIN_GROUP_ID,
+                        text=f"⚠️ Fallback admin (report_id={rid})\n\n{preview or '(preview vide)'}"
+                    )
+                    asyncio.create_task(delete_after_delay([fb], 20))
+                except Exception as e2:
+                    print(f"[WORKER FALLBACK SEND ERR] {e2}")
 
             REVIEW_QUEUE.task_done()
+
         except Exception as e:
-            print(f"[WORKER] {e}")
+            print(f"[WORKER LOOP ERR] {e}")
             await asyncio.sleep(1)
 
 async def cleaner_loop():
