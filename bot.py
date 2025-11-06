@@ -1271,43 +1271,63 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         files_list = []
         message_ids_to_delete = []
 
-        if media_group_id:
-            # ==== ALBUM =====
-            async with aiosqlite.connect(DB_NAME) as db:
-                async with db.cursor() as c:
-                    await c.execute(
-                        """
-                        SELECT message_id, file_type, file_id, caption
-                        FROM media_archive
-                        WHERE media_group_id = ? AND chat_id = ?
-                        ORDER BY message_id
-                        """,
-                        (media_group_id, PUBLIC_GROUP_ID)
-                    )
-                    rows = await c.fetchall()
+     if media_group_id:
+        # ==== ALBUM (robuste) =====
+        files_list = []
+        message_ids_to_delete = []
+        album_caption = None  # on tentera de choper la légende du 1er média
 
-            if rows:
-                if not override_text:
-                    for _, _, _, cap in rows:
-                        if cap:
-                            final_text = final_text or cap
-                            break
+        # texte initial (peut être vide si tu réponds à une photo 2/4)
+        base_text = (original_msg.caption or original_msg.text or "").strip()
 
-                for i, (mid, file_type, file_id, _) in enumerate(rows):
-                    message_ids_to_delete.append(mid)
-                    if file_type == "photo":
-                        files_list.append({"type": "photo", "file_id": file_id})
-                    elif file_type == "video":
-                        files_list.append({"type": "video", "file_id": file_id})
-            else:
-                print("[MODIFIER] Album non trouvé en archive, fallback message seul")
-                if original_msg.photo:
-                    files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
-                elif original_msg.video:
-                    files_list.append({"type": "video", "file_id": original_msg.video.file_id})
-                message_ids_to_delete.append(original_msg.message_id)
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.cursor() as c:
+                await c.execute(
+                    """
+                    SELECT message_id, file_type, file_id, caption
+                    FROM media_archive
+                    WHERE media_group_id = ? AND chat_id = ?
+                    ORDER BY message_id ASC
+                    """,
+                    (media_group_id, PUBLIC_GROUP_ID)
+                )
+                rows = await c.fetchall()
 
-            report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
+        if rows:
+            # 1) légende = caption du 1er média avec caption non vide
+            for (mid, file_type, file_id, cap) in rows:
+                if cap and not album_caption:
+                    album_caption = cap.strip()
+                    break
+
+            # 2) construction de la liste des médias
+            for (mid, file_type, file_id, cap) in rows:
+                message_ids_to_delete.append(mid)
+                if file_type == "photo":
+                    files_list.append({"type": "photo", "file_id": file_id})
+                elif file_type == "video":
+                    files_list.append({"type": "video", "file_id": file_id})
+
+            # 3) texte final : priorité override > base_text > album_caption
+            override_text = (msg.text or "").replace("/modifier", "").strip()
+            final_text = override_text or base_text or (album_caption or "")
+        else:
+            # Fallback : archive manquante (trop vieille / non album réel)
+            override_text = (msg.text or "").replace("/modifier", "").strip()
+            final_text = override_text or base_text or ""
+            if original_msg.photo:
+                files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
+            elif original_msg.video:
+                files_list.append({"type": "video", "file_id": original_msg.video.file_id})
+            message_ids_to_delete.append(original_msg.message_id)
+
+        # Limites Telegram (sécurité)
+        if final_text and len(final_text) > 1024:
+            final_text = final_text[:1021] + "…"
+        if len(files_list) > 10:
+            files_list = files_list[:10]
+
+        report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
 
         else:
             # ==== MESSAGE SIMPLE ====
