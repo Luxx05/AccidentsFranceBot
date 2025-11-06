@@ -769,29 +769,33 @@ async def finalize_album_later(media_group_id, context: ContextTypes.DEFAULT_TYP
 # =========================
 # ADMIN
 # =========================
-async def send_report_to_admin(application: Application, report_id: str, preview_text: str, files: list[dict]):
+async def send_report_to_admin(
+    application: Application,
+    report_id: str,
+    preview_text: str,
+    files: list[dict],
+    raw_text: str | None = None,   # <<< ajouté
+):
     kb = _build_mod_keyboard(report_id)
     sent_ids = []
 
-    # (NOUVEAU) — On relit le texte + user en base pour fiabiliser l’aperçu ET la légende
-    caption_text = ""
-    preview_from_db = ""
-    try:
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute(
-                "SELECT text, user_name FROM pending_reports WHERE report_id = ?",
-                (report_id,)
-            ) as cur:
-                row = await cur.fetchone()
-                if row:
-                    caption_text = (row[0] or "").strip()
-                    user_name = row[1] or "public"
-                else:
-                    user_name = "public"
-        preview_from_db = _make_admin_preview(user_name, caption_text, is_album=(len(files) > 1))
-    except Exception as e:
-        print(f"[ADMIN SEND] fetch text/user err: {e}")
-        preview_from_db = preview_text  # fallback si la BDD plante
+    # ---- Texte à utiliser pour la légende des médias ----
+    caption_text = (raw_text or "").strip()  # priorité au texte transmis
+
+    if not caption_text:
+        # fallback DB (compat)
+        try:
+            async with aiosqlite.connect(DB_NAME) as db:
+                async with db.execute(
+                    "SELECT text FROM pending_reports WHERE report_id = ?",
+                    (report_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                    if row and row[0]:
+                        caption_text = (row[0] or "").strip()
+        except Exception as e:
+            print(f"[ADMIN SEND] caption fetch err: {e}")
+            preview_from_db = preview_text  # fallback si la BDD plante
 
     try:
         # 1) message d’aperçu + boutons
@@ -1238,10 +1242,12 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
-    # Admins only
+    # 1️⃣ Sécurité : commande réservée aux admins du groupe PUBLIC
     try:
         user_id = msg.from_user.id
-        is_admin_check = (user_id in [1087968824, 136817688]) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
+        is_admin_check = (
+            user_id in [1087968824, 136817688]
+        ) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         if not is_admin_check:
             try:
                 await msg.delete()
@@ -1252,10 +1258,13 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         print(f"[MODIFIER CHECK] {e}")
         return
 
+    # 2️⃣ Il faut répondre à un message
     original_msg = msg.reply_to_message
     if not original_msg:
         try:
-            m = await msg.reply_text("Usage : répondez à un message avec /modifier pour l’envoyer en re-modération.")
+            m = await msg.reply_text(
+                "Usage : répondez à un message avec /modifier pour l’envoyer en re-modération."
+            )
             asyncio.create_task(delete_after_delay([msg, m], 6))
         except Exception:
             pass
@@ -1265,15 +1274,20 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
     override_text = (msg.text or "").replace("/modifier", "").strip()
 
     try:
-        files_list: list[dict] = []
-        message_ids_to_delete: list[int] = []
-        final_text = ""
+        files_list = []
+        message_ids_to_delete = []
+        final_text = None
 
+        # ======================================
+        # 🔹 ALBUM
+        # ======================================
         if media_group_id:
-            # ALBUM
-            base_text = (original_msg.caption or original_msg.text or "").strip()
+            files_list = []
+            message_ids_to_delete = []
             album_caption = None
+            base_text = (original_msg.caption or original_msg.text or "").strip()
             rows = []
+
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     async with db.execute(
@@ -1290,22 +1304,22 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                 print(f"[MODIFIER album fetch] {e}")
 
             if rows:
-                # Caption du 1er média non vide
-                for mid, ftype, fid, cap in rows:
-                    if cap and not album_caption:
+                # Cherche la première légende non vide dans l’album
+                for mid, file_type, file_id, cap in rows:
+                    if not album_caption and cap:
                         album_caption = cap.strip()
-                        break
-                # Build médias
-                for mid, ftype, fid, cap in rows:
+
+                # Liste des médias
+                for mid, file_type, file_id, cap in rows:
                     message_ids_to_delete.append(mid)
-                    if ftype == "photo":
-                        files_list.append({"type": "photo", "file_id": fid})
-                    elif ftype == "video":
-                        files_list.append({"type": "video", "file_id": fid})
+                    if file_type == "photo":
+                        files_list.append({"type": "photo", "file_id": file_id})
+                    elif file_type == "video":
+                        files_list.append({"type": "video", "file_id": file_id})
 
                 final_text = override_text or base_text or (album_caption or "")
             else:
-                # Fallback (pas d’archive)
+                # Pas trouvé dans l’archive : fallback basique
                 base_text = (original_msg.caption or original_msg.text or "").strip()
                 final_text = override_text or base_text or ""
                 if original_msg.photo:
@@ -1314,7 +1328,7 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                     files_list.append({"type": "video", "file_id": original_msg.video.file_id})
                 message_ids_to_delete.append(original_msg.message_id)
 
-            # Garde-fous
+            # Sécurité Telegram
             if final_text and len(final_text) > 1024:
                 final_text = final_text[:1021] + "…"
             if len(files_list) > 10:
@@ -1322,20 +1336,26 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
 
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
 
+        # ======================================
+        # 🔹 MESSAGE SIMPLE (texte seul ou 1 média)
+        # ======================================
         else:
-            # MESSAGE SIMPLE (texte seul ou 1 média)
             base_text = (original_msg.caption or original_msg.text or "").strip()
             final_text = override_text or base_text or ""
+
             if original_msg.photo:
                 files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
             elif original_msg.video:
                 files_list.append({"type": "video", "file_id": original_msg.video.file_id})
+
             message_ids_to_delete.append(original_msg.message_id)
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{original_msg.message_id}"
 
-        # Sauvegarde pending + envoi admin
+        # ======================================
+        # 🔹 Sauvegarde & Envoi admin
+        # ======================================
         user = original_msg.from_user
-        user_name = f"@{user.username}" if (user and user.username) else "public"
+        user_name = f"@{user.username}" if user and user.username else "public"
         created_ts = int(time.time())
         files_json = json.dumps(files_list)
 
@@ -1349,27 +1369,41 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         note = "\n\n♻️ Renvoi en modération depuis le groupe public."
         preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
 
-        await REVIEW_QUEUE.put({"report_id": report_id, "preview_text": preview_text, "files": files_list})
+        # ✅ AJOUT IMPORTANT : on inclut le texte
+        await REVIEW_QUEUE.put(
+            {"report_id": report_id, "preview_text": preview_text, "files": files_list, "text": final_text}
+        )
 
-        # Nettoyage public
+        # ======================================
+        # 🔹 Nettoyage du public
+        # ======================================
         if media_group_id and not message_ids_to_delete:
             message_ids_to_delete.append(original_msg.message_id)
+
         for mid in set(message_ids_to_delete):
             try:
                 await context.bot.delete_message(PUBLIC_GROUP_ID, mid)
             except Exception as e:
                 print(f"[MODIFIER] del public {mid}: {e}")
+
         try:
             await msg.delete()
         except Exception:
             pass
 
+        # Message temporaire d’info
         try:
-            info = await context.bot.send_message(chat_id=PUBLIC_GROUP_ID, text="♻️ Publication retirée — renvoyée en modération.")
+            info = await context.bot.send_message(
+                chat_id=PUBLIC_GROUP_ID,
+                text="♻️ Publication retirée — renvoyée en modération.",
+            )
             asyncio.create_task(delete_after_delay([info], 5))
         except Exception:
             pass
 
+    # ======================================
+    # 🔹 Gestion d'erreur
+    # ======================================
     except Exception as e:
         print(f"[MODIFIER PUB] {e}")
         try:
@@ -1584,7 +1618,10 @@ async def worker_loop(application: Application):
             rid = item["report_id"]
             preview = item["preview_text"]
             files = item["files"]
-            await send_report_to_admin(application, rid, preview, files)
+            raw_text = item.get("text")  # <<< ajouté
+
+            await send_report_to_admin(application, rid, preview, files, raw_text=raw_text)
+
             REVIEW_QUEUE.task_done()
         except Exception as e:
             print(f"[WORKER] {e}")
