@@ -453,7 +453,6 @@ async def heartbeat_loop(application: Application):
                     await application.stop()
                 except Exception:
                     pass
-                break
                 try:
                     await application.shutdown()
                 except Exception:
@@ -800,8 +799,7 @@ async def send_report_to_admin(application: Application, report_id: str, preview
         )
         sent_ids.append(m.message_id)
 
-        # 👉 2) Envoie le TEXTE en message séparé pour être sûr qu'il soit visible
-        # (même si Telegram drop la caption d’un album)
+        # 👉 2) Envoie le TEXTE en message séparé
         if caption_text:
             mt = await application.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
@@ -809,7 +807,7 @@ async def send_report_to_admin(application: Application, report_id: str, preview
             )
             sent_ids.append(mt.message_id)
 
-        # 👉 3) Envoi des médias si présents, avec caption sur le 1er élément
+        # 👉 3) Envoi des médias
         if files:
             if len(files) == 1:
                 f = files[0]
@@ -817,7 +815,7 @@ async def send_report_to_admin(application: Application, report_id: str, preview
                     pm = await application.bot.send_photo(
                         chat_id=ADMIN_GROUP_ID,
                         photo=f["file_id"],
-                        caption=caption_text  # doublon volontaire + message séparé au-dessus
+                        caption=caption_text
                     )
                 else:
                     pm = await application.bot.send_video(
@@ -1702,17 +1700,19 @@ async def handle_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_after_delay([msg, m], 10))
         except Exception: pass
 
-async def handle_unlock(update: Update, Context: ContextTypes.DEFAULT_TYPE):
+# ✅ FIX ICI: signature & usage de `context`
+async def handle_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
-    if not await is_user_admin(Context, PUBLIC_GROUP_ID, msg.from_user.id):
+    if not await is_user_admin(context, PUBLIC_GROUP_ID, msg.from_user.id):
         try:
             await msg.delete()
-        except Exception: pass
+        except Exception:
+            pass
         return
 
     try:
-        await Context.bot.set_chat_permissions(
+        await context.bot.set_chat_permissions(
             chat_id=PUBLIC_GROUP_ID,
             permissions=DEFAULT_PERMISSIONS
         )
@@ -1723,13 +1723,14 @@ async def handle_unlock(update: Update, Context: ContextTypes.DEFAULT_TYPE):
                 row = await c.fetchone()
             if row:
                 try:
-                    await Context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
-                except Exception: pass
+                    await context.bot.delete_message(PUBLIC_GROUP_ID, int(row[0]))
+                except Exception:
+                    pass
 
             await db.execute("DELETE FROM bot_state WHERE key = 'lock_message_id'")
             await db.commit()
 
-        sent_msg = await Context.bot.send_message(
+        sent_msg = await context.bot.send_message(
             chat_id=PUBLIC_GROUP_ID,
             text="🔓 Le chat est déverrouillé."
         )
@@ -1742,7 +1743,8 @@ async def handle_unlock(update: Update, Context: ContextTypes.DEFAULT_TYPE):
         try:
             m = await msg.reply_text(f"Erreur lors du déverrouillage: {e}")
             asyncio.create_task(delete_after_delay([msg, m], 10))
-        except Exception: pass
+        except Exception:
+            pass
 
 # NOUVEAU : Handler pour nettoyer les commandes admin tapées dans le public
 async def handle_public_admin_command_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1850,12 +1852,15 @@ def main():
             # Si on sort proprement (watchdog stop), on notifie et on repart
             _notify_admin_sync("🟠 Bot redémarre (watchdog).")
 
-            # enregistrer un redémarrage
+            # ✅ FIX: appel propre à _log_restart sans 'with'
             try:
-                with asyncio.run_coroutine_threadsafe(_log_restart(), asyncio.get_event_loop()):
+                loop = asyncio.get_event_loop()
+                fut = asyncio.run_coroutine_threadsafe(_log_restart(), loop)
+                try:
+                    fut.result(timeout=2)
+                except Exception:
                     pass
             except Exception:
-                # si la loop n'est pas accessible, on le fera dans la prochaine itération
                 pass
 
             backoff = 2  # reset backoff après un run OK
