@@ -1244,11 +1244,11 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
-    # Admin only (public)
+    # 1) Sécurité : réservé aux admins du groupe PUBLIC
     try:
         user_id = msg.from_user.id
-        is_admin_check = (user_id in [1087968824, 136817688]) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
-        if not is_admin_check:
+        is_admin = (user_id in [1087968824, 136817688]) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
+        if not is_admin:
             try:
                 await msg.delete()
             except Exception:
@@ -1258,6 +1258,7 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         print(f"[MODIFIER CHECK] {e}")
         return
 
+    # 2) Il faut répondre à un message
     original_msg = msg.reply_to_message
     if not original_msg:
         try:
@@ -1271,14 +1272,19 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
     override_text = (msg.text or "").replace("/modifier", "").strip()
 
     try:
-        files_list = []
-        message_ids_to_delete = []
-        final_text = None
+        files_list: list[dict] = []
+        message_ids_to_delete: list[int] = []
+        final_text: str | None = None
 
+        # =========================
+        # 🔹 ALBUM
+        # =========================
         if media_group_id:
             album_caption = None
             base_text = (original_msg.caption or original_msg.text or "").strip()
             rows = []
+
+            # Récupère l’album archivé (public)
             try:
                 async with aiosqlite.connect(DB_NAME) as db:
                     async with db.execute(
@@ -1295,17 +1301,23 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                 print(f"[MODIFIER album fetch] {e}")
 
             if rows:
-                for mid, file_type, file_id, cap in rows:
+                # caption de l’album = 1ère non vide
+                for _, _, _, cap in rows:
                     if not album_caption and cap:
                         album_caption = cap.strip()
-                for mid, file_type, file_id, cap in rows:
+
+                # médias
+                for mid, file_type, file_id, _ in rows:
                     message_ids_to_delete.append(mid)
                     if file_type == "photo":
                         files_list.append({"type": "photo", "file_id": file_id})
                     elif file_type == "video":
                         files_list.append({"type": "video", "file_id": file_id})
+
+                # priorité texte : override > base > album_caption
                 final_text = override_text or base_text or (album_caption or "")
             else:
+                # fallback minimal si archive manquante
                 base_text = (original_msg.caption or original_msg.text or "").strip()
                 final_text = override_text or base_text or ""
                 if original_msg.photo:
@@ -1314,6 +1326,7 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
                     files_list.append({"type": "video", "file_id": original_msg.video.file_id})
                 message_ids_to_delete.append(original_msg.message_id)
 
+            # limites Telegram
             if final_text and len(final_text) > 1024:
                 final_text = final_text[:1021] + "…"
             if len(files_list) > 10:
@@ -1321,10 +1334,43 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
 
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
 
+        # =========================
+        # 🔹 MESSAGE SIMPLE (texte seul ou 1 média)
+        # =========================
         else:
             base_text = (original_msg.caption or original_msg.text or "").strip()
-            final_text = override_text or base_text or ""
 
+            # Essaie de récupérer la “vraie” caption depuis l’archive si base_text est vide/suspecte
+            archive_caption = None
+            try:
+                async with aiosqlite.connect(DB_NAME) as db:
+                    async with db.execute(
+                        "SELECT caption FROM media_archive WHERE message_id = ? AND chat_id = ? LIMIT 1",
+                        (original_msg.message_id, PUBLIC_GROUP_ID)
+                    ) as cur:
+                        r = await cur.fetchone()
+                        if r and r[0]:
+                            archive_caption = (r[0] or "").strip()
+            except Exception as e:
+                print(f"[MODIFIER simple] archive caption fetch err: {e}")
+
+            def is_bad(txt: str | None) -> bool:
+                if not txt:
+                    return True
+                t = txt.strip().lower()
+                # évite les “captions” vides / juste une mention
+                return (not t) or t in {"@accidentsfrancebot", "@accidentsfr"} or len(t) < 3
+
+            # priorité: override > base_text > archive_caption
+            candidate = override_text if override_text else base_text
+            if is_bad(candidate) and not is_bad(archive_caption):
+                candidate = archive_caption
+
+            final_text = candidate or ""
+            if final_text and len(final_text) > 1024:
+                final_text = final_text[:1021] + "…"
+
+            # média (si présent)
             if original_msg.photo:
                 files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
             elif original_msg.video:
@@ -1333,6 +1379,9 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             message_ids_to_delete.append(original_msg.message_id)
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{original_msg.message_id}"
 
+        # =========================
+        # 🔹 Sauvegarde & envoi en modération
+        # =========================
         user = original_msg.from_user
         user_name = f"@{user.username}" if user and user.username else "public"
         created_ts = int(time.time())
@@ -1348,9 +1397,12 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         note = "\n\n♻️ Renvoi en modération depuis le groupe public."
         preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
 
-        q = get_review_queue_from_context(context)
-        await q.put({"report_id": report_id, "preview_text": preview_text, "files": files_list})
+        # Enfile dans la file de revue
+        await REVIEW_QUEUE.put({"report_id": report_id, "preview_text": preview_text, "files": files_list})
 
+        # =========================
+        # 🔹 Nettoyage du public
+        # =========================
         if media_group_id and not message_ids_to_delete:
             message_ids_to_delete.append(original_msg.message_id)
 
