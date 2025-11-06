@@ -1236,10 +1236,12 @@ async def handle_deplacer_public(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
-    # 1) sécurité : commande utilisable uniquement par un admin du groupe PUBLIC
+    # 1️⃣ Sécurité : commande réservée aux admins du groupe PUBLIC
     try:
         user_id = msg.from_user.id
-        is_admin_check = (user_id in [1087968824, 136817688]) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
+        is_admin_check = (
+            user_id in [1087968824, 136817688]
+        ) or await is_user_admin(context, PUBLIC_GROUP_ID, user_id)
         if not is_admin_check:
             try:
                 await msg.delete()
@@ -1250,87 +1252,91 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         print(f"[MODIFIER CHECK] {e}")
         return
 
-    # 2) il faut répondre à un message
+    # 2️⃣ Il faut répondre à un message
     original_msg = msg.reply_to_message
     if not original_msg:
         try:
-            m = await msg.reply_text("Usage : répondez à un message avec /modifier pour l’envoyer en re-modération.")
+            m = await msg.reply_text(
+                "Usage : répondez à un message avec /modifier pour l’envoyer en re-modération."
+            )
             asyncio.create_task(delete_after_delay([msg, m], 6))
         except Exception:
             pass
         return
 
     media_group_id = original_msg.media_group_id
-    base_text = (original_msg.caption or original_msg.text or "").strip()
-
     override_text = (msg.text or "").replace("/modifier", "").strip()
-    final_text = override_text if override_text else base_text
-    final_text = final_text or ""  # jamais None
 
     try:
         files_list = []
         message_ids_to_delete = []
+        final_text = None
 
-     if media_group_id:
-        # ==== ALBUM (robuste) =====
-        files_list = []
-        message_ids_to_delete = []
-        album_caption = None  # on tentera de choper la légende du 1er média
+        # ======================================
+        # 🔹 ALBUM
+        # ======================================
+        if media_group_id:
+            files_list = []
+            message_ids_to_delete = []
+            album_caption = None
+            base_text = (original_msg.caption or original_msg.text or "").strip()
+            rows = []
 
-        # texte initial (peut être vide si tu réponds à une photo 2/4)
-        base_text = (original_msg.caption or original_msg.text or "").strip()
+            try:
+                async with aiosqlite.connect(DB_NAME) as db:
+                    async with db.execute(
+                        """
+                        SELECT message_id, file_type, file_id, caption
+                        FROM media_archive
+                        WHERE media_group_id = ? AND chat_id = ?
+                        ORDER BY message_id ASC
+                        """,
+                        (media_group_id, PUBLIC_GROUP_ID),
+                    ) as cur:
+                        rows = await cur.fetchall()
+            except Exception as e:
+                print(f"[MODIFIER album fetch] {e}")
 
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.cursor() as c:
-                await c.execute(
-                    """
-                    SELECT message_id, file_type, file_id, caption
-                    FROM media_archive
-                    WHERE media_group_id = ? AND chat_id = ?
-                    ORDER BY message_id ASC
-                    """,
-                    (media_group_id, PUBLIC_GROUP_ID)
-                )
-                rows = await c.fetchall()
+            if rows:
+                # Cherche la première légende non vide dans l’album
+                for mid, file_type, file_id, cap in rows:
+                    if not album_caption and cap:
+                        album_caption = cap.strip()
 
-        if rows:
-            # 1) légende = caption du 1er média avec caption non vide
-            for (mid, file_type, file_id, cap) in rows:
-                if cap and not album_caption:
-                    album_caption = cap.strip()
-                    break
+                # Liste des médias
+                for mid, file_type, file_id, cap in rows:
+                    message_ids_to_delete.append(mid)
+                    if file_type == "photo":
+                        files_list.append({"type": "photo", "file_id": file_id})
+                    elif file_type == "video":
+                        files_list.append({"type": "video", "file_id": file_id})
 
-            # 2) construction de la liste des médias
-            for (mid, file_type, file_id, cap) in rows:
-                message_ids_to_delete.append(mid)
-                if file_type == "photo":
-                    files_list.append({"type": "photo", "file_id": file_id})
-                elif file_type == "video":
-                    files_list.append({"type": "video", "file_id": file_id})
+                final_text = override_text or base_text or (album_caption or "")
+            else:
+                # Pas trouvé dans l’archive : fallback basique
+                base_text = (original_msg.caption or original_msg.text or "").strip()
+                final_text = override_text or base_text or ""
+                if original_msg.photo:
+                    files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
+                elif original_msg.video:
+                    files_list.append({"type": "video", "file_id": original_msg.video.file_id})
+                message_ids_to_delete.append(original_msg.message_id)
 
-            # 3) texte final : priorité override > base_text > album_caption
-            override_text = (msg.text or "").replace("/modifier", "").strip()
-            final_text = override_text or base_text or (album_caption or "")
+            # Sécurité Telegram
+            if final_text and len(final_text) > 1024:
+                final_text = final_text[:1021] + "…"
+            if len(files_list) > 10:
+                files_list = files_list[:10]
+
+            report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
+
+        # ======================================
+        # 🔹 MESSAGE SIMPLE (texte seul ou 1 média)
+        # ======================================
         else:
-            # Fallback : archive manquante (trop vieille / non album réel)
-            override_text = (msg.text or "").replace("/modifier", "").strip()
+            base_text = (original_msg.caption or original_msg.text or "").strip()
             final_text = override_text or base_text or ""
-            if original_msg.photo:
-                files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
-            elif original_msg.video:
-                files_list.append({"type": "video", "file_id": original_msg.video.file_id})
-            message_ids_to_delete.append(original_msg.message_id)
 
-        # Limites Telegram (sécurité)
-        if final_text and len(final_text) > 1024:
-            final_text = final_text[:1021] + "…"
-        if len(files_list) > 10:
-            files_list = files_list[:10]
-
-        report_id = f"reedit_{PUBLIC_GROUP_ID}_{media_group_id}_{original_msg.message_id}"
-
-        else:
-            # ==== MESSAGE SIMPLE ====
             if original_msg.photo:
                 files_list.append({"type": "photo", "file_id": original_msg.photo[-1].file_id})
             elif original_msg.video:
@@ -1339,7 +1345,9 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             message_ids_to_delete.append(original_msg.message_id)
             report_id = f"reedit_{PUBLIC_GROUP_ID}_{original_msg.message_id}"
 
-        # -- Enregistrement en pending & envoi admin
+        # ======================================
+        # 🔹 Sauvegarde & Envoi admin
+        # ======================================
         user = original_msg.from_user
         user_name = f"@{user.username}" if user and user.username else "public"
         created_ts = int(time.time())
@@ -1348,21 +1356,20 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO pending_reports (report_id, text, files_json, created_ts, user_name) VALUES (?,?,?,?,?)",
-                (report_id, final_text, files_json, created_ts, user_name)
+                (report_id, final_text, files_json, created_ts, user_name),
             )
             await db.commit()
 
-        # ==== NOTE intégrée dans le bloc admin ====
-        note = "\n\n♻️Renvoi en modération depuis le groupe public."
+        note = "\n\n♻️ Renvoi en modération depuis le groupe public."
         preview_text = _make_admin_preview(user_name, final_text, is_album=(len(files_list) > 1)) + note
 
-        await REVIEW_QUEUE.put({
-            "report_id": report_id,
-            "preview_text": preview_text,
-            "files": files_list,
-        })
+        await REVIEW_QUEUE.put(
+            {"report_id": report_id, "preview_text": preview_text, "files": files_list}
+        )
 
-        # ==== Suppression dans le public ====
+        # ======================================
+        # 🔹 Nettoyage du public
+        # ======================================
         if media_group_id and not message_ids_to_delete:
             message_ids_to_delete.append(original_msg.message_id)
 
@@ -1370,14 +1377,14 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
             try:
                 await context.bot.delete_message(PUBLIC_GROUP_ID, mid)
             except Exception as e:
-                print(f"[MODIFIER] del public {mid} : {e}")
+                print(f"[MODIFIER] del public {mid}: {e}")
 
         try:
             await msg.delete()
         except Exception:
             pass
 
-        # Feedback auto-suppression
+        # Message temporaire d’info
         try:
             info = await context.bot.send_message(
                 chat_id=PUBLIC_GROUP_ID,
@@ -1387,6 +1394,9 @@ async def handle_modifier_public(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
+    # ======================================
+    # 🔹 Gestion d'erreur
+    # ======================================
     except Exception as e:
         print(f"[MODIFIER PUB] {e}")
         try:
