@@ -712,7 +712,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         }
         album = TEMP_ALBUMS[media_group_id]
     if media_type and file_id:
-        album["files"].append({"type": media_type, "file_id": file_id})
+    album["files"].append({"type": media_type, "file_id": file_id})
     if piece_text and not album.get("text"):
     album["text"] = piece_text
     album["ts"] = _now()
